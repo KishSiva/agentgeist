@@ -62,6 +62,7 @@ def run(args):
     scenario = None
     current_tick = None
     latest_result = None
+    decision_state = {}
     completed = False
     try:
         scenario = MCPConnection(os.environ["SCENARIO_MCP"])
@@ -73,7 +74,7 @@ def run(args):
             if not row["decision"]:
                 current_tick = Tick.model_validate_json(row["tick"])
                 latest_result = None
-                latest_result = process_tick(current_tick, args, team, store, scenario, run_swarm, notify)
+                latest_result = process_tick(current_tick, args, team, store, scenario, run_swarm, notify, decision_state)
             elif args.submit:
                 current_tick = Tick.model_validate_json(row["tick"])
                 latest_result = json.loads(row["decision"])
@@ -97,12 +98,13 @@ def run(args):
                     emit("invalid_tick_saved", receipt_id=receipt_id)
                     raise
                 latest_result = None
+                decision_state.clear()
                 existing = store.get(team, current_tick.tick_id)
                 if existing:
                     emit("tick_already_saved", tick_id=current_tick.tick_id, status=existing["status"])
                     continue
                 store.save_tick(team, current_tick)
-                latest_result = process_tick(current_tick, args, team, store, scenario, run_swarm, notify)
+                latest_result = process_tick(current_tick, args, team, store, scenario, run_swarm, notify, decision_state)
                 if not args.submit:
                     break  # Leave one unsubmitted decision in the durable outbox.
             emit("scoreboard", data=scenario.call("hack26-get-scoreboard"))
@@ -110,6 +112,8 @@ def run(args):
         return report
     finally:
         failure = sys.exc_info()[1]
+        if latest_result is None and current_tick is not None and decision_state.get("tick_id") == current_tick.tick_id:
+            latest_result = decision_state["result"]
         if scenario is not None:
             try:
                 scenario.close()
@@ -125,7 +129,7 @@ def run(args):
             raise RunFailed(type(failure).__name__, run_id, report["notification"]) from None
 
 
-def process_tick(tick, args, team, store, scenario, run_swarm, notify):
+def process_tick(tick, args, team, store, scenario, run_swarm, notify, decision_state=None):
     start = time.monotonic()
     ledger = tick_ledger(tick, team, store)
     try:
@@ -148,6 +152,8 @@ def process_tick(tick, args, team, store, scenario, run_swarm, notify):
     result["credits_reserved"] = store.spent(team, tick.tick_id)
     store.update(team, tick.tick_id, "decision", result)
     emit("decision", tick_id=tick.tick_id, **{k:v for k,v in result.items() if k != "evidence"})
+    if decision_state is not None:
+        decision_state.update(tick_id=tick.tick_id, result=result)
     if args.submit:
         judgment = submit(scenario, store, team, tick, result)
         result["judgment"] = judgment

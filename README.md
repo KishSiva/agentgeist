@@ -103,7 +103,7 @@ Set `DISCORD_WEBHOOK_URL` in the environment or the ignored `.env` file. Never c
 Set `DISCORD_TRANSPORT=webhook` to post directly when One is unavailable.
 Every fixture and live execution uses the competition message format: action, rationale, score when supplied,
 false-alarm status, peak agents, measured decision time, and sensor inspection order. An exhausted feed reports
-that no decision was made; unavailable metrics never become zero or copied historical values. Fixture runs remain non-venue and
+that no decision was made; unavailable metrics never become zero or another tick's values. Resumed decisions keep their original measured time. Fixture runs remain non-venue and
 do not claim a venue submission, score, or judgment. A separate judgment escalation can still be sent after an
 accepted live submission.
 

@@ -196,7 +196,7 @@ def test_live_failure_posts_one_failed_summary(monkeypatch, tmp_path, cleanup_fa
     assert "private venue error" not in messages[0]["content"]
 
 
-@pytest.mark.parametrize("second_tick", ["failed", "duplicate"])
+@pytest.mark.parametrize("second_tick", ["failed", "duplicate", "submission_failed"])
 def test_second_tick_without_decision_never_borrows_previous_metrics(monkeypatch, tmp_path, second_tick):
     from agentgeist import connections, swarm
     first, first_result, _ = incident()
@@ -216,6 +216,8 @@ def test_second_tick_without_decision_never_borrows_previous_metrics(monkeypatch
             if tool == "hack26-get-tick":
                 return next(feed)
             if tool == "hack26-submit-containment":
+                if second_tick == "submission_failed" and kwargs["tick_id"] == second.tick_id:
+                    raise RuntimeError("submission failed")
                 return {"score": 1, "false_alarm": False}
             assert tool == "hack26-get-scoreboard"
             return {}
@@ -224,7 +226,7 @@ def test_second_tick_without_decision_never_borrows_previous_metrics(monkeypatch
             pass
 
     def analyze(tick, ledger):
-        if tick.tick_id == second.tick_id:
+        if tick.tick_id == second.tick_id and second_tick == "failed":
             raise RuntimeError("second tick failed")
         return dict(first_result)
 
@@ -240,7 +242,7 @@ def test_second_tick_without_decision_never_borrows_previous_metrics(monkeypatch
     monkeypatch.setattr(notifier, "notify_run", notify)
     args = Namespace(team="agentgeist", db=db, scenario="outbreak-level-5", ticks=3,
                      submit=True, discord=False, discord_transport="webhook")
-    if second_tick == "failed":
+    if second_tick in ("failed", "submission_failed"):
         with pytest.raises(RuntimeError):
             cli.run(args)
     else:
@@ -248,10 +250,19 @@ def test_second_tick_without_decision_never_borrows_previous_metrics(monkeypatch
     assert len(messages) == 1
     status, data = messages[0]
     assert data["tick"].tick_id == second.tick_id
-    assert data["result"] is None and data["judgment"] is None
+    assert data["judgment"] is None
+    if second_tick != "submission_failed":
+        assert data["result"] is None
+    else:
+        assert data["result"]["peak_active_agents"] == 4
+        assert data["result"]["decision_seconds"] >= 0
     body = notifier.run_notification_body("agentgeist", "a" * 32, "live", status,
                                           tick=data["tick"], result=data["result"], judgment=data["judgment"])
-    assert "decision time: not available" in body["content"]
+    if second_tick == "submission_failed":
+        assert "no completed decision" not in body["content"]
+        assert "Run status: FAILED after the decision." in body["content"]
+    else:
+        assert "decision time: not available" in body["content"]
     assert "Score: not supplied; false alarm: not supplied" in body["content"]
 
 
