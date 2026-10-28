@@ -19,6 +19,8 @@ cp .env.example .env
 .venv/bin/agentgeist run
 # Explicit scored submissions and public Discord incident evidence:
 .venv/bin/agentgeist run --ticks 2 --submit --discord
+# Direct app-owned webhook delivery, including saved judgments without new ticks:
+.venv/bin/agentgeist notify --tick-id 142 --discord-transport webhook
 ```
 
 `demo` is an **offline policy demonstration**, not a simulated successful partner integration.
@@ -33,7 +35,7 @@ The fixtures come from the event's published fixture files. Demo mode never subm
 | Sighting researcher | Sightings from every sector | You.com Search and Contents |
 | Civilian marshal | Civilian status and containment state | Local civilian triage |
 | Incident commander | Specialist reports | CrewAI hierarchical synthesis |
-| Escalation officer | Approved decision and judgment only | One MCP Discord action |
+| Escalation officer | Approved decision and judgment only | One MCP or an operator-configured Discord webhook |
 
 The three specialists do not receive the full tick. A mandatory sensing phase executes each specialist's tool before its model analysis.
 The commander then coordinates their reports through a CrewAI hierarchical crew.
@@ -84,7 +86,29 @@ Use the same database for the same team. A new database starts a new local estim
 
 Raw responses remain in the SQLite `ingress` table when validation fails. Inspect and repair contract drift before another pull.
 Plain `run` advances the live cursor even without `--submit`. Use `demo` for offline checks.
-Missing Discord access never triggers a direct-webhook bypass. Public messages use only the supervisor's trusted rationale.
+Public messages use only the supervisor's trusted rationale. They include a simulation label and disable all mentions.
+
+### Discord webhook delivery
+
+Set `DISCORD_WEBHOOK_URL` in the environment or the ignored `.env` file. Never commit the URL or pass it as a command argument.
+Set `DISCORD_TRANSPORT=webhook` to post directly when One is unavailable.
+The app sends the notification from its normal scored-tick flow; no separate posting script is needed.
+
+```bash
+# Uses the webhook for each containment or evacuation judgment:
+.venv/bin/agentgeist run --submit --discord --discord-transport webhook
+# Drain saved accepted judgments only. This command never contacts the scenario feed:
+.venv/bin/agentgeist notify --discord-transport webhook
+```
+
+The default `auto` transport prefers One. It uses the configured webhook only if One fails **before** a send attempt.
+The `one` transport never uses the webhook. The `webhook` transport does not require One credentials.
+Before a webhook post, the app verifies that the webhook targets `1564842098740695100`.
+It requests the message receipt and records the returned message identifier and link.
+The app skips already delivered judgments. An uncertain write stays `unknown`; neither automatic retries nor cross-transport fallback can duplicate that write.
+Discord webhooks do not provide the same nonce-based duplicate protection as bot messages. Keep the same state database and resolve uncertain deliveries manually.
+The `notify` command exits with an error when delivery remains pending or unknown.
+These commands are bounded runs, not an installed background service.
 
 ## Connections
 
@@ -94,7 +118,7 @@ The scenario endpoint normally needs no key. Set `SCENARIO_TOKEN` only if organi
 One's hosted endpoint uses OAuth, not an API key as a bearer token.
 This project uses the official `@withone/mcp@2.3.2` stdio server with `ONE_SECRET=ONE_API_KEY`.
 It discovers the Discord action and its request contract before it sends anything.
-No Discord bot token or direct webhook bypass is required.
+No Discord bot token is required. An optional venue webhook supports direct delivery with the operator's permission.
 
 The configured `ONE_MCP_URL` remains available for an OAuth-capable client, but this CLI does not use it with the API key.
 The default models were listed by the live Parasail catalog during setup. Override the model names in `.env` if needed.
