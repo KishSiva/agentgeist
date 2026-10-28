@@ -196,6 +196,65 @@ def test_live_failure_posts_one_failed_summary(monkeypatch, tmp_path, cleanup_fa
     assert "private venue error" not in messages[0]["content"]
 
 
+@pytest.mark.parametrize("second_tick", ["failed", "duplicate"])
+def test_second_tick_without_decision_never_borrows_previous_metrics(monkeypatch, tmp_path, second_tick):
+    from agentgeist import connections, swarm
+    first, first_result, _ = incident()
+    second = first.model_copy(update={"tick_id": first.tick_id + 1}, deep=True)
+    db = str(tmp_path / "two-ticks.sqlite3")
+    if second_tick == "duplicate":
+        store = Store(db)
+        store.save_tick("agentgeist", second)
+        store.update("agentgeist", second.tick_id, "decision", first_result)
+        store.update("agentgeist", second.tick_id, "judgment", {"score": 0, "false_alarm": True})
+        store.update("agentgeist", second.tick_id, "escalation", {"status": "sent"})
+        store.db.close()
+    feed = iter([{"tick": first.model_dump()}, {"tick": second.model_dump()}, {"exhausted": True}])
+
+    class Scenario:
+        def call(self, tool, **kwargs):
+            if tool == "hack26-get-tick":
+                return next(feed)
+            if tool == "hack26-submit-containment":
+                return {"score": 1, "false_alarm": False}
+            assert tool == "hack26-get-scoreboard"
+            return {}
+
+        def close(self):
+            pass
+
+    def analyze(tick, ledger):
+        if tick.tick_id == second.tick_id:
+            raise RuntimeError("second tick failed")
+        return dict(first_result)
+
+    messages = []
+
+    def notify(team, run_id, mode, status, ledger, **kwargs):
+        messages.append((status, kwargs))
+        return {"status": "sent", "message_id": "123"}
+
+    monkeypatch.setenv("SCENARIO_MCP", "mock://scenario")
+    monkeypatch.setattr(connections, "MCPConnection", lambda *args: Scenario())
+    monkeypatch.setattr(swarm, "run_swarm", analyze)
+    monkeypatch.setattr(notifier, "notify_run", notify)
+    args = Namespace(team="agentgeist", db=db, scenario="outbreak-level-5", ticks=3,
+                     submit=True, discord=False, discord_transport="webhook")
+    if second_tick == "failed":
+        with pytest.raises(RuntimeError):
+            cli.run(args)
+    else:
+        cli.run(args)
+    assert len(messages) == 1
+    status, data = messages[0]
+    assert data["tick"].tick_id == second.tick_id
+    assert data["result"] is None and data["judgment"] is None
+    body = notifier.run_notification_body("agentgeist", "a" * 32, "live", status,
+                                          tick=data["tick"], result=data["result"], judgment=data["judgment"])
+    assert "decision time: not available" in body["content"]
+    assert "Score: not supplied; false alarm: not supplied" in body["content"]
+
+
 def test_wrong_target_never_posts(webhook):
     calls = webhook(lambda request: httpx.Response(200, json={"channel_id": "wrong"}))
     before = []
