@@ -50,7 +50,8 @@ It treats crowd motion and folklore alone as insufficient evidence. These transp
 ## Budget and failure behavior
 
 - The active-agent gate rejects a tick with fewer than four available slots before model or partner calls.
-- The shared ledger reserves credits before each model, embedding, research, and escalation call.
+- The shared ledger reserves credits before each model, embedding, research, and One escalation call.
+- Direct webhook delivery reserves no incident credits, including failed setup checks and retries. The active-agent limit still applies.
 - A durable team-wide ceiling also limits total reservations across ticks. New ticks cannot reset spent credits.
 - The credit unit is a conservative local token-equivalent estimate, **not verified venue billing**. The feed does not document a monetary conversion.
 - Model reservations use twice the cl100k input token count plus an output allowance. Automatic model retries are disabled.
@@ -103,6 +104,9 @@ The app sends the notification from its normal scored-tick flow; no separate pos
 
 The default `auto` transport prefers One. It uses the configured webhook only if One fails **before** a send attempt.
 The `one` transport never uses the webhook. The `webhook` transport does not require One credentials.
+One attempts retain the 1500-credit reservation. An automatic webhook fallback adds no further reservation.
+If `auto` cannot reserve enough credits for One, it can still use a configured webhook without calling One.
+Existing recorded reservations are not refunded or rewritten by this change.
 Before a webhook post, the app verifies that the webhook targets `1564842098740695100`.
 It requests the message receipt and records the returned message identifier and link.
 The app skips already delivered judgments. An uncertain write stays `unknown`; neither automatic retries nor cross-transport fallback can duplicate that write.

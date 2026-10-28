@@ -74,7 +74,7 @@ def test_webhook_delivery_verifies_channel_and_receipt(webhook, monkeypatch, cap
     assert len(before) == 1
     assert receipt["delivery"] == "webhook"
     assert receipt["message_url"] == f"https://discord.com/channels/1234/{CHANNEL}/5678"
-    assert ledger.peak == 1 and ledger.spent == 1500
+    assert ledger.peak == 1 and ledger.spent == 0 and ledger.remaining == 45000
     assert "test-token" not in caplog.text
 
 
@@ -166,3 +166,83 @@ def test_notify_cli_posts_saved_judgment_once_without_scenario(webhook, monkeypa
     cli.main()
     assert sum(r.method == "POST" for r in calls) == 1
     assert json.loads(store.get("agentgeist", tick.tick_id)["escalation"])["delivery"] == "webhook"
+
+
+def test_webhook_succeeds_with_no_incident_credits(webhook):
+    calls = webhook(success)
+    def forbidden_reservation(units):
+        pytest.fail("Webhook must not reserve incident credits")
+    ledger = Ledger(1, 0, on_reserve=forbidden_reservation)
+    assert notifier.notify("agentgeist", *incident(), ledger)["status"] == "sent"
+    assert [r.method for r in calls] == ["GET", "POST"]
+    assert ledger.spent == 0 and ledger.remaining == 0 and ledger.active == 0
+
+
+@pytest.mark.parametrize("failure", ["bad_url", "wrong_channel", "metadata_failure", "post_timeout"])
+def test_repeated_webhook_failures_preserve_durable_credits(webhook, monkeypatch, tmp_path, failure):
+    def handler(request):
+        if failure == "metadata_failure":
+            return httpx.Response(503)
+        if failure == "wrong_channel":
+            return httpx.Response(200, json={"channel_id": "wrong"})
+        if request.method == "POST":
+            raise httpx.ReadTimeout("lost receipt", request=request)
+        return success(request)
+    webhook(handler)
+    if failure == "bad_url":
+        monkeypatch.setenv("DISCORD_WEBHOOK_URL", "not-a-webhook")
+    tick, result, judgment = incident()
+    store = Store(str(tmp_path / "credits.db"))
+    store.save_tick("agentgeist", tick)
+    from agentgeist.cli import tick_ledger
+    # Direct function calls model independent operator attempts. The CLI still guards unknown writes.
+    for _ in range(3):
+        ledger = tick_ledger(tick, "agentgeist", store)
+        with pytest.raises((ValueError, RuntimeError)):
+            notifier.notify("agentgeist", tick, result, judgment, ledger)
+        assert ledger.spent == 0 and ledger.active == 0
+    assert store.spent("agentgeist", tick.tick_id) == 0
+    assert store.remaining("agentgeist") == tick.swarm_budget.api_credits_remaining
+
+
+def test_one_attempt_keeps_credit_reservation(monkeypatch):
+    monkeypatch.setattr(notifier, "notify_one", lambda body, callback: {"status": "sent", "delivery": "one"})
+    ledger = Ledger(1, 1500)
+    assert notifier.notify("agentgeist", *incident(), ledger, transport="one")["delivery"] == "one"
+    assert ledger.spent == 1500 and ledger.remaining == 0
+
+
+def test_one_cannot_exceed_credit_limit(monkeypatch):
+    from agentgeist.budget import BudgetExceeded
+    monkeypatch.setattr(notifier, "notify_one", lambda *args: pytest.fail("Unfunded One call"))
+    ledger = Ledger(1, 1499)
+    with pytest.raises(BudgetExceeded):
+        notifier.notify("agentgeist", *incident(), ledger, transport="one")
+    assert ledger.spent == 0 and ledger.remaining == 1499
+
+
+def test_auto_fallback_charges_only_the_one_attempt(webhook, monkeypatch):
+    webhook(success)
+    def unavailable(body, callback):
+        raise notifier.NoDiscordConnection()
+    monkeypatch.setattr(notifier, "notify_one", unavailable)
+    ledger = Ledger(1, 1500)
+    assert notifier.notify("agentgeist", *incident(), ledger, transport="auto")["delivery"] == "webhook"
+    assert ledger.spent == 1500 and ledger.remaining == 0
+
+
+def test_auto_uses_webhook_when_one_budget_is_exhausted(webhook, monkeypatch):
+    webhook(success)
+    monkeypatch.setattr(notifier, "notify_one", lambda *args: pytest.fail("Unfunded One call"))
+    ledger = Ledger(1, 0)
+    assert notifier.notify("agentgeist", *incident(), ledger, transport="auto")["delivery"] == "webhook"
+    assert ledger.spent == 0
+
+
+def test_free_webhook_still_respects_agent_limit(webhook):
+    from agentgeist.budget import BudgetExceeded
+    calls = webhook(success)
+    ledger = Ledger(0, 0)
+    with pytest.raises(BudgetExceeded):
+        notifier.notify("agentgeist", *incident(), ledger)
+    assert not calls and ledger.active == 0 and ledger.spent == 0

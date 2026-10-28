@@ -125,7 +125,6 @@ def notify(team, tick, result, judgment, ledger, before_send=lambda: None, trans
     if transport not in ("auto", "one", "webhook"):
         raise ValueError("Discord transport must be auto, one, or webhook")
     with ledger.agents(1):
-        ledger.reserve(1500)
         body = notification_body(team, tick, result, judgment)
         attempted = False
 
@@ -137,6 +136,8 @@ def notify(team, tick, result, judgment, ledger, before_send=lambda: None, trans
         if transport == "webhook":
             return notify_webhook(body, mark_attempted)
         try:
+            # Only One uses incident credits. Venue webhook I/O needs no model/provider reservation.
+            ledger.reserve(1500)
             return notify_one(body, mark_attempted)
         except Exception:
             if transport != "auto" or attempted or not os.getenv("DISCORD_WEBHOOK_URL"):
