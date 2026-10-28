@@ -72,11 +72,13 @@ def run(args):
                 continue
             if not row["decision"]:
                 current_tick = Tick.model_validate_json(row["tick"])
+                latest_result = None
                 latest_result = process_tick(current_tick, args, team, store, scenario, run_swarm, notify)
             elif args.submit:
                 current_tick = Tick.model_validate_json(row["tick"])
                 latest_result = json.loads(row["decision"])
                 judgment = json.loads(row["judgment"]) if row["judgment"] else submit(scenario, store, team, current_tick, latest_result)
+                latest_result["judgment"] = judgment
                 escalate(current_tick, latest_result, judgment, args, team, store, notify)
         if not args.submit and any(not row["judgment"] for row in store.pending(team)):
             emit("submission_pending", resolution="Use run --submit to replay the saved decision")
@@ -94,6 +96,7 @@ def run(args):
                 except ValueError:
                     emit("invalid_tick_saved", receipt_id=receipt_id)
                     raise
+                latest_result = None
                 existing = store.get(team, current_tick.tick_id)
                 if existing:
                     emit("tick_already_saved", tick_id=current_tick.tick_id, status=existing["status"])
@@ -113,9 +116,10 @@ def run(args):
             except Exception as error:
                 completed = False
                 failure = error
+        judgment = latest_result.get("judgment") if latest_result else None
         report["notification"] = run_summary(team, run_id, current_tick, latest_result, completed,
                                                submission_requested=bool(args.submit),
-                                               transport=getattr(args, "discord_transport", None))
+                                               transport=getattr(args, "discord_transport", None), judgment=judgment)
         emit("run_notification", **report["notification"])
         if not completed and isinstance(failure, Exception):
             raise RunFailed(type(failure).__name__, run_id, report["notification"]) from None
@@ -146,11 +150,12 @@ def process_tick(tick, args, team, store, scenario, run_swarm, notify):
     emit("decision", tick_id=tick.tick_id, **{k:v for k,v in result.items() if k != "evidence"})
     if args.submit:
         judgment = submit(scenario, store, team, tick, result)
+        result["judgment"] = judgment
         escalate(tick, result, judgment, args, team, store, notify, ledger)
     return result
 
 
-def run_summary(team, run_id, tick, result, completed, submission_requested, transport):
+def run_summary(team, run_id, tick, result, completed, submission_requested, transport, judgment=None):
     """Post exactly one neutral completion receipt for this execution."""
     from .notifier import notify_run
     receipt = {"status": "failed", "run_id": run_id}
@@ -160,7 +165,7 @@ def run_summary(team, run_id, tick, result, completed, submission_requested, tra
 
     try:
         delivered = notify_run(team, run_id, "live", "completed" if completed else "failed", Ledger(1, 0),
-                               tick=tick, result=result, submission_requested=submission_requested,
+                               tick=tick, result=result, submission_requested=submission_requested, judgment=judgment,
                                before_send=before_send, transport=transport)
     except Exception:
         return receipt

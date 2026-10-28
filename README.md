@@ -101,7 +101,9 @@ venue score or judgment unless a separate, accepted submission receipt exists.
 
 Set `DISCORD_WEBHOOK_URL` in the environment or the ignored `.env` file. Never commit the URL or pass it as a command argument.
 Set `DISCORD_TRANSPORT=webhook` to post directly when One is unavailable.
-The app sends one neutral run summary from every real fixture or live execution. Fixture runs remain non-venue and
+Every fixture and live execution uses the competition message format: action, rationale, score when supplied,
+false-alarm status, peak agents, measured decision time, and sensor inspection order. An exhausted feed reports
+that no decision was made; unavailable metrics never become zero or copied historical values. Fixture runs remain non-venue and
 do not claim a venue submission, score, or judgment. A separate judgment escalation can still be sent after an
 accepted live submission.
 

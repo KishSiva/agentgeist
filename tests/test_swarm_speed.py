@@ -85,6 +85,7 @@ def test_parallel_specialists_keep_context_order_scope_and_distinct_clients(monk
         context.reset(token)
     assert seen == ["flow-context"] * 3
     assert len({id(a.llm.inner) for a in state.agents}) == 4
+    assert all(a.llm.inner.max_tokens == 256 for a in state.agents)
     assert all(a.llm.ledger is ledger for a in state.agents)
     assert state.retrievals.count("embeddings") == state.retrievals.count("research") == 1
     assert all(not a.allow_delegation for a in state.agents)

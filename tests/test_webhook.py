@@ -79,25 +79,63 @@ def test_webhook_delivery_verifies_channel_and_receipt(webhook, monkeypatch, cap
     assert "test-token" not in caplog.text
 
 
+def test_competition_message_includes_measured_metrics_and_real_judgment():
+    tick, result, judgment = incident()
+    tick.sector_reports.append(tick.sector_reports[0].model_copy(update={"sector": "entrance"}))
+    result.update(decision_seconds=11.586, sensor_inspection_priority=["catering_coffee_bar", "entrance"])
+    scored = notifier.notification_body("agentgeist", tick, result, judgment)
+    summary = notifier.run_notification_body("agentgeist", "a" * 32, "live", "completed",
+                                             tick, result, judgment=judgment)
+    assert summary["content"].startswith(scored["content"])
+    assert "Score: 1; false alarm: False. Peak agents: 4; decision time: 11.586s." in summary["content"]
+    assert "Sensor inspection order: catering_coffee_bar, entrance" in summary["content"]
+    assert "RUN COMPLETE" not in summary["content"]
+
+
+def test_exhausted_run_never_invents_decision_metrics_or_a_score():
+    body = notifier.run_notification_body("agentgeist", "a" * 32, "live", "completed")
+    assert "no new tick: no decision was made" in body["content"]
+    assert "Score: not supplied; false alarm: not supplied." in body["content"]
+    assert "Peak agents: not available; decision time: not available." in body["content"]
+    assert "Sensor inspection order: not available" in body["content"]
+
+
+def test_competition_metrics_reject_untrusted_text_and_invalid_numbers():
+    tick, result, _ = incident()
+    result.update(peak_active_agents=True, decision_seconds=float("nan"),
+                  sensor_inspection_priority=["@everyone", "entrance"])
+    body = notifier.run_notification_body("agentgeist", "a" * 32, "fixture", "completed", tick, result,
+                                          judgment={"score": float("inf"), "false_alarm": "@everyone"})
+    assert "@everyone" not in body["content"]
+    assert "decision time: not available" in body["content"]
+    assert "Score: not supplied; false alarm: not supplied" in body["content"]
+
+
 def test_run_summary_uses_neutral_format_for_fixture_and_live():
     tick, result, _ = incident()
     run_id = "a" * 32
     fixture = notifier.run_notification_body("agentgeist", run_id, "fixture", "completed", tick, result)
     live = notifier.run_notification_body("agentgeist", run_id, "live", "completed", tick, result)
     assert fixture == live
-    assert "RUN COMPLETE" in fixture["content"]
+    assert "SIMULATION | tick 142 | evacuate" in fixture["content"]
+    assert "Peak agents: 4; decision time: 1.5s." in fixture["content"]
+    assert "Sensor inspection order: catering_coffee_bar" in fixture["content"]
     assert "TEST" not in fixture["content"] and "FIXTURE" not in fixture["content"]
-    assert "Score:" not in fixture["content"] and "judgment" in fixture["content"]
+    assert "Score: not supplied; false alarm: not supplied." in fixture["content"]
+    assert "run summary, not a judgment" not in fixture["content"]
     assert fixture["allowed_mentions"] == {"parse": []}
 
 
-def test_live_observe_run_posts_one_summary_without_judgment(monkeypatch, tmp_path):
+@pytest.mark.parametrize("submit", [False, True])
+def test_live_observe_run_posts_one_summary_with_available_judgment(monkeypatch, tmp_path, submit):
     tick_data = json.loads(Path("fixtures/control-tick.json").read_text())["ticks"][0]
 
     class Scenario:
         def call(self, tool, **kwargs):
             if tool == "hack26-get-tick":
                 return {"tick": tick_data}
+            if tool == "hack26-submit-containment":
+                return {"score": 1, "false_alarm": False}
             assert tool == "hack26-get-scoreboard"
             return {}
         def close(self):
@@ -116,11 +154,12 @@ def test_live_observe_run_posts_one_summary_without_judgment(monkeypatch, tmp_pa
     monkeypatch.setattr(notifier, "notify_run", fake_notify)
 
     report = cli.run(Namespace(team="agentgeist", db=str(tmp_path / "state.db"), scenario="control-tick",
-                               ticks=1, submit=False, discord=False, discord_transport="webhook"))
+                               ticks=1, submit=submit, discord=False, discord_transport="webhook"))
     assert report["notification"] == {"status": "sent", "message_id": "123", "run_id": report["run_id"]}
     assert len(calls) == 1
     assert calls[0][2:4] == ("live", "completed")
-    assert calls[0][4]["submission_requested"] is False
+    assert calls[0][4]["submission_requested"] is submit
+    assert calls[0][4]["judgment"] == ({"score": 1, "false_alarm": False} if submit else None)
     assert calls[0][4]["result"]["decision"]["action"] == "observe"
 
 

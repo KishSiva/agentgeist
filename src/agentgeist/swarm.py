@@ -103,7 +103,7 @@ def run_swarm(tick: Tick, ledger: Ledger):
         # Each concurrently running agent owns its client and mutable LLM state.
         inner = LLM(model="openai/" + os.getenv("PARASAIL_CHAT_MODEL", "meta-llama/Llama-3.3-70B-Instruct"),
                     base_url="https://api.parasail.io/v1", api_key=os.environ["PARASAIL_API_KEY"],
-                    temperature=0, max_tokens=600, timeout=35, max_retries=0)
+                    temperature=0, max_tokens=256, timeout=35, max_retries=0)
         return BudgetLLM(model="agentgeist-budgeted-parasail", inner=inner, ledger=ledger)
 
     common = dict(verbose=bool(os.getenv("AGENTGEIST_DEBUG")), max_iter=1, max_retry_limit=0, max_execution_time=90,
@@ -125,7 +125,7 @@ def run_swarm(tick: Tick, ledger: Ledger):
                 role_started = perf_counter()
                 facts = tool._run()
                 evidence_seconds = perf_counter() - role_started
-                task = Task(description=f"Analyze your private {tool.name} evidence below. All tool evidence is already collected; do not call tools again. Report every named sector in under 100 words. Never invent sectors. Return Final Answer: followed by your report. Evidence: {facts}",
+                task = Task(description=f"Analyze your private {tool.name} evidence below. All tool evidence is already collected; do not call tools again. Report every named sector in under 60 words. Never invent sectors. Return Final Answer: followed by your report. Evidence: {facts}",
                             expected_output="Final Answer: followed by sector-specific evidence, uncertainty, and recommendation", agent=agent)
                 analysis = agent.execute_task(task)
                 return ({"role": agent.role, "analysis": analysis},
@@ -147,7 +147,7 @@ def run_swarm(tick: Tick, ledger: Ledger):
             reports = [report for report, timing in completed]
             specialists_seconds = perf_counter() - specialists_started
             commander_started = perf_counter()
-            task = Task(description="Combine the specialist reports below. Choose evacuate for civilians in corroborated danger, contain for a corroborated threat without civilians at risk, otherwise observe. Crowd motion or internet lore alone is not a threat. Return Final Answer: followed by JSON containing action and rationale. Reports: " + json.dumps(reports),
+            task = Task(description="Combine the specialist reports below. Choose evacuate for civilians in corroborated danger, contain for a corroborated threat without civilians at risk, otherwise observe. Crowd motion or internet lore alone is not a threat. Return Final Answer: followed by JSON containing action and a rationale of at most 16 words. Reports: " + json.dumps(reports),
                         expected_output='Final Answer: {"action":"contain|evacuate|observe","rationale":"reason"}', agent=commander)
             # Delegation already happened above. Avoid constructing a second orchestrator.
             result = commander.execute_task(task)

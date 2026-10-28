@@ -54,55 +54,62 @@ def message_receipt(response):
     raise RuntimeError("No message identifier for the approved Discord channel; delivery remains unverified")
 
 
-def notification_body(team, tick, result, judgment):
-    from .contracts import safety_floor
-    decision = safety_floor(tick).model_dump()  # Never publish untrusted model or web text.
-    message = (f"Agentgeist ({team}) | SIMULATION | tick {tick.tick_id} | {decision['action']}\n"
-               f"{decision['rationale']}\n"
-               f"Score: {judgment.get('score', 'not supplied')}; false alarm: {judgment.get('false_alarm', 'not supplied')}. "
-               f"Peak agents: {result['peak_active_agents']}; decision time: {result.get('decision_seconds', 'n/a')}s.\n"
-               f"Sensor inspection order: {', '.join(result.get('sensor_inspection_priority', []))}")
-    nonce = str(int(hashlib.sha256(f"{team}:{tick.tick_id}".encode()).hexdigest()[:16], 16))
-    return {"content": message[:1900], "allowed_mentions": {"parse": []}, "nonce": nonce, "enforce_nonce": True}
-
-
 def _duration(value):
     if type(value) not in (int, float) or not 0 <= value < 86400:
         return None
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
-def run_notification_body(team, run_id, mode, run_status, tick=None, result=None, submission_requested=False):
-    """Build a trusted run-level message without publishing model or venue content."""
+def competition_content(team, tick, result, judgment=None, run_status="completed"):
+    """Use measured decision metrics and only a real, supplied venue judgment."""
     from .contracts import safety_floor
+    result = result if isinstance(result, dict) else {}
+    judgment = judgment if isinstance(judgment, dict) else {}
+    score = judgment.get("score")
+    score = score if type(score) in (int, float) and 0 <= score <= 1 else "not supplied"
+    false_alarm = judgment.get("false_alarm")
+    false_alarm = false_alarm if type(false_alarm) is bool else "not supplied"
+    peak = result.get("peak_active_agents")
+    peak = peak if type(peak) is int and 0 <= peak <= 100 else "not available"
+    seconds = _duration(result.get("decision_seconds"))
+    seconds = seconds + "s" if seconds is not None else "not available"
+    if tick is not None and isinstance(result.get("decision"), dict):
+        decision = safety_floor(tick).model_dump()
+        heading = (f"Agentgeist ({team}) | SIMULATION | tick {tick.tick_id} | "
+                   f"{decision['action']} {decision['rationale']}")
+    elif tick is not None:
+        state = "RUN FAILED" if run_status == "failed" else "no new decision"
+        heading = f"Agentgeist ({team}) | SIMULATION | tick {tick.tick_id} | {state}: no completed decision"
+    else:
+        state = "RUN FAILED" if run_status == "failed" else "no new tick"
+        heading = f"Agentgeist ({team}) | SIMULATION | {state}: no decision was made"
+    sectors = {sector.sector for sector in tick.sector_reports} if tick is not None else set()
+    priority = result.get("sensor_inspection_priority", [])
+    priority = [sector for sector in priority if isinstance(sector, str) and sector in sectors] if isinstance(priority, list) else []
+    lines = [heading,
+             f"Score: {score}; false alarm: {false_alarm}. Peak agents: {peak}; decision time: {seconds}.",
+             f"Sensor inspection order: {', '.join(priority) if priority else 'not available'}"]
+    if run_status == "failed" and result.get("decision"):
+        lines.append("Run status: FAILED after the decision.")
+    if result.get("mode") == "budget_fallback":
+        lines.append("Decision source: budget fallback.")
+    return "\n".join(lines)
+
+
+def notification_body(team, tick, result, judgment):
+    message = competition_content(team, tick, result, judgment)
+    nonce = str(int(hashlib.sha256(f"{team}:{tick.tick_id}".encode()).hexdigest()[:16], 16))
+    return {"content": message[:1900], "allowed_mentions": {"parse": []}, "nonce": nonce, "enforce_nonce": True}
+
+
+def run_notification_body(team, run_id, mode, run_status, tick=None, result=None, submission_requested=False,
+                          judgment=None):
+    """Use the competition format for both fixture and live run messages."""
     if mode not in ("fixture", "live") or run_status not in ("completed", "failed"):
         raise ValueError("Invalid run notification state")
     if not re.fullmatch(r"[a-f0-9-]{16,64}", run_id):
         raise ValueError("Invalid run identifier")
-    state = "COMPLETE" if run_status == "completed" else "FAILED"
-    lines = [f"Agentgeist ({team}) | RUN {state}", f"Run ID: {run_id}"]
-    submission = "requested" if submission_requested else "not requested"
-    lines.append(f"Venue submission: {submission}. This is a run summary, not a judgment.")
-    if tick is not None:
-        decision = safety_floor(tick).model_dump()
-        lines.append(f"Safety decision: {decision['action']} — {decision['rationale']}")
-    if isinstance(result, dict):
-        metrics = []
-        peak = result.get("peak_active_agents")
-        if type(peak) is int and 0 <= peak <= 100:
-            metrics.append(f"peak agents: {peak}")
-        decision_seconds = _duration(result.get("decision_seconds"))
-        if decision_seconds is not None:
-            metrics.append(f"decision: {decision_seconds}s")
-        timings = result.get("timings")
-        if isinstance(timings, dict):
-            for name in ("specialists", "commander", "total"):
-                duration = _duration(timings.get(name + "_seconds"))
-                if duration is not None:
-                    metrics.append(f"{name}: {duration}s")
-        if metrics:
-            lines.append("Metrics: " + "; ".join(metrics))
-    message = "\n".join(lines)
+    message = competition_content(team, tick, result, judgment, run_status) + f"\nRun ID: {run_id}"
     nonce = str(int(hashlib.sha256(f"run:{team}:{run_id}".encode()).hexdigest()[:16], 16))
     return {"content": message[:1900], "allowed_mentions": {"parse": []}, "nonce": nonce, "enforce_nonce": True}
 
@@ -190,6 +197,6 @@ def notify(team, tick, result, judgment, ledger, before_send=lambda: None, trans
 
 
 def notify_run(team, run_id, mode, run_status, ledger, tick=None, result=None,
-               submission_requested=False, before_send=lambda: None, transport=None):
-    return _deliver(run_notification_body(team, run_id, mode, run_status, tick, result, submission_requested),
+               submission_requested=False, before_send=lambda: None, transport=None, judgment=None):
+    return _deliver(run_notification_body(team, run_id, mode, run_status, tick, result, submission_requested, judgment),
                     ledger, before_send, transport)
