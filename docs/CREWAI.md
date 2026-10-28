@@ -57,7 +57,7 @@ Configure deployment secrets directly in CrewAI:
 | `SCENARIO_MCP` | Venue feed, only for live mode |
 | `DISCORD_WEBHOOK_URL` | Discord credential, only for live posting |
 | `DISCORD_TRANSPORT` | Set to `webhook` for direct posting |
-| `CREWAI_TRACING_ENABLED` | Set to `true` |
+| `CREWAI_TRACING_ENABLED` | Set to `true` for fixture runs; `false` for live runs |
 | `OTEL_SDK_DISABLED` | Set to `false` |
 
 Never put secret values in kickoff inputs, source code, trace labels, screenshots, or GitHub.
@@ -73,7 +73,11 @@ The default website run uses safe fixture mode. A trigger payload can select ano
 
 Live mode advances the team cursor even when `submit` is false.
 First configure durable storage and a single execution worker for the team.
-Set `AGENTGEIST_STATE_DIR` to that durable directory and `AGENTGEIST_ENABLE_LIVE=true`.
+Set `AGENTGEIST_STATE_DIR` to that durable directory's absolute path and `AGENTGEIST_ENABLE_LIVE=true`.
+Live mode rejects missing or relative state paths. The operator must verify storage durability.
+Set `CREWAI_TRACING_ENABLED=false` for live runs. Live mode rejects active CrewAI trace sessions.
+Venue MCP calls contain credentials, so only fixture runs support tracing.
+Live failures report only the exception type, not credential-bearing error text.
 Keep the same state database between runs and redeployments.
 A local file lock does not coordinate separate replicas with separate disks.
 

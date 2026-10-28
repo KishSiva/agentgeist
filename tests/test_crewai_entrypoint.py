@@ -51,6 +51,7 @@ def test_live_mode_requires_explicit_environment_permission(monkeypatch):
 def test_live_mode_preserves_cli_flags_and_bounded_execution(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENTGEIST_ENABLE_LIVE", "true")
     monkeypatch.setenv("AGENTGEIST_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("CREWAI_TRACING_ENABLED", "false")
     monkeypatch.setenv("DISCORD_TRANSPORT", "webhook")
     def fake_run(args):
         assert args.ticks == 1 and args.submit is True and args.discord is True
@@ -110,3 +111,56 @@ def test_trigger_console_returns_none_and_forwards_input(monkeypatch, capsys):
     monkeypatch.setattr(main, "AgentgeistFlow", FakeFlow)
     assert main.run_with_trigger() is None
     assert json.loads(capsys.readouterr().out) == {"ok": True}
+
+
+@pytest.mark.parametrize("tracing", [None, "true"])
+def test_live_mode_requires_tracing_explicitly_disabled(monkeypatch, tmp_path, tracing):
+    monkeypatch.setenv("AGENTGEIST_ENABLE_LIVE", "true")
+    monkeypatch.setenv("AGENTGEIST_STATE_DIR", str(tmp_path))
+    if tracing is None:
+        monkeypatch.delenv("CREWAI_TRACING_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("CREWAI_TRACING_ENABLED", tracing)
+    monkeypatch.setattr(cli, "run", lambda *a: pytest.fail("Traced live execution must not start"))
+    with pytest.raises(ValueError, match="CREWAI_TRACING_ENABLED=false"):
+        main.execute(main.RunOptions(mode="live"))
+
+
+@pytest.mark.parametrize("active", ["legacy", "session"])
+def test_live_mode_rejects_active_trace_context(monkeypatch, tmp_path, active):
+    from crewai.events.listeners.tracing import utils
+    from crewai.telemetry.tracing import context
+    monkeypatch.setenv("AGENTGEIST_ENABLE_LIVE", "true")
+    monkeypatch.setenv("CREWAI_TRACING_ENABLED", "false")
+    monkeypatch.setenv("AGENTGEIST_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(utils, "is_tracing_enabled_in_context", lambda: active == "legacy")
+    monkeypatch.setattr(context, "get_trace_session", lambda: object() if active == "session" else None)
+    monkeypatch.setattr(cli, "run", lambda *a: pytest.fail("Active trace context must block live mode"))
+    with pytest.raises(ValueError, match="no active CrewAI tracing"):
+        main.execute(main.RunOptions(mode="live"))
+
+
+@pytest.mark.parametrize("directory", [None, "state"])
+def test_live_mode_requires_explicit_absolute_state_directory(monkeypatch, directory):
+    monkeypatch.setenv("AGENTGEIST_ENABLE_LIVE", "true")
+    monkeypatch.setenv("CREWAI_TRACING_ENABLED", "false")
+    if directory is None:
+        monkeypatch.delenv("AGENTGEIST_STATE_DIR", raising=False)
+    else:
+        monkeypatch.setenv("AGENTGEIST_STATE_DIR", directory)
+    monkeypatch.setattr(cli, "run", lambda *a: pytest.fail("Unconfigured state must block live mode"))
+    with pytest.raises(ValueError, match="AGENTGEIST_STATE_DIR"):
+        main.execute(main.RunOptions(mode="live"))
+
+
+def test_live_mode_sanitizes_failures(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTGEIST_ENABLE_LIVE", "true")
+    monkeypatch.setenv("CREWAI_TRACING_ENABLED", "false")
+    monkeypatch.setenv("AGENTGEIST_STATE_DIR", str(tmp_path))
+    def fail(args):
+        raise ValueError("private-authenticated-url")
+    monkeypatch.setattr(cli, "run", fail)
+    with pytest.raises(RuntimeError) as caught:
+        main.execute(main.RunOptions(mode="live"))
+    assert str(caught.value) == "Live execution failed: ValueError"
+    assert caught.value.__suppress_context__ is True

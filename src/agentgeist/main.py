@@ -49,22 +49,40 @@ def execute(options: RunOptions):
 
     if os.getenv("AGENTGEIST_ENABLE_LIVE", "false").lower() != "true":
         raise ValueError("Set AGENTGEIST_ENABLE_LIVE=true only after configuring durable, single-worker state")
+    from crewai.events.listeners.tracing.utils import is_tracing_enabled_in_context
+    from crewai.telemetry.tracing.context import get_trace_session
+
+    # Venue MCP events contain credentials. Never run them inside a traced Flow.
+    if (os.getenv("CREWAI_TRACING_ENABLED", "").lower() != "false"
+            or is_tracing_enabled_in_context() or get_trace_session() is not None):
+        raise ValueError("Live mode requires CREWAI_TRACING_ENABLED=false and no active CrewAI tracing")
+    state_directory = os.getenv("AGENTGEIST_STATE_DIR", "")
+    if not state_directory or not Path(state_directory).is_absolute():
+        raise ValueError("Set AGENTGEIST_STATE_DIR to an absolute durable directory before live mode")
+
     from agentgeist.cli import run
     from agentgeist.store import Store
-    directory = Path(os.getenv("AGENTGEIST_STATE_DIR", "state"))
-    directory.mkdir(parents=True, exist_ok=True)
+    directory = Path(state_directory)
     db = str(directory / "agentgeist.sqlite3")
     args = Namespace(team=options.team, db=db, scenario=options.scenario, ticks=1,
                      submit=options.submit, discord=options.discord,
                      discord_transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
-    with open(db + ".lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        run(args)
-        store = Store(db)
-        rows = store.db.execute("SELECT tick_id,judgment,escalation,status FROM incidents WHERE team=? ORDER BY tick_id DESC LIMIT 20",
-                                (options.team,)).fetchall()
-        saved = [{"tick_id": row[0], "judgment": json.loads(row[1]) if row[1] else None,
-                  "escalation": json.loads(row[2]) if row[2] else None, "status": row[3]} for row in rows]
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with open(db + ".lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            run(args)
+            store = Store(db)
+            try:
+                rows = store.db.execute("SELECT tick_id,judgment,escalation,status FROM incidents WHERE team=? ORDER BY tick_id DESC LIMIT 20",
+                                        (options.team,)).fetchall()
+                saved = [{"tick_id": row[0], "judgment": json.loads(row[1]) if row[1] else None,
+                          "escalation": json.loads(row[2]) if row[2] else None, "status": row[3]} for row in rows]
+            finally:
+                store.db.close()
+    except Exception as error:
+        # HTTP exceptions can contain authenticated URLs; do not expose their text.
+        raise RuntimeError(f"Live execution failed: {type(error).__name__}") from None
     return {"mode": "live", "team": options.team, "saved_incidents": saved}
 
 
