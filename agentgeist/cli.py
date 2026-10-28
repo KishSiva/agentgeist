@@ -126,17 +126,23 @@ def process_tick(tick, args, team, store, scenario, run_swarm, notify):
 
 
 def escalate(tick, result, judgment, args, team, store, notify, ledger=None):
+    row = store.get(team, tick.tick_id)
+    prior = json.loads(row["escalation"]) if row and row["escalation"] else {}
+    if prior.get("status") in ("sent", "user_confirmed", "unknown"):
+        emit("escalation_skipped", tick_id=tick.tick_id, status=prior["status"])
+        return
     if result["decision"]["action"] == "observe":
         store.update(team, tick.tick_id, "escalation", {"status": "not_required"})
         return
     if not args.discord or getattr(args, "discord_blocked", False):
-        emit("escalation_pending", tick_id=tick.tick_id, reason="Enable --discord to post through One MCP")
+        emit("escalation_pending", tick_id=tick.tick_id, reason="Enable --discord and configure the Discord transport")
         return
     ledger = ledger or tick_ledger(tick, team, store)
     store.update(team, tick.tick_id, "escalation", {"status": "pending"})
     try:
         receipt = notify(team, tick, result, judgment, ledger,
-                         before_send=lambda: store.update(team, tick.tick_id, "escalation", {"status": "unknown"}))
+                         before_send=lambda: store.update(team, tick.tick_id, "escalation", {"status": "unknown"}),
+                         transport=getattr(args, "discord_transport", None))
         store.update(team, tick.tick_id, "escalation", receipt)
         emit("discord_receipt", tick_id=tick.tick_id, receipt=receipt)
     except Exception as exc:
@@ -167,7 +173,12 @@ def main():
     live.add_argument("--scenario", choices=["outbreak-level-5", "control-tick"], default="outbreak-level-5")
     live.add_argument("--ticks", type=int, choices=range(1, 21), default=1)
     live.add_argument("--submit", action="store_true", help="Explicitly enable scored submissions")
-    live.add_argument("--discord", action="store_true", help="Enable incident posting through One MCP")
+    live.add_argument("--discord", action="store_true", help="Enable incident posting through the configured Discord transport")
+    live.add_argument("--discord-transport", choices=["auto", "one", "webhook"], default=os.getenv("DISCORD_TRANSPORT", "auto"))
+    notifications = commands.add_parser("notify", help="Post saved accepted decisions without pulling or submitting scenario ticks")
+    notifications.add_argument("--tick-id", type=int)
+    notifications.add_argument("--discord-transport", choices=["auto", "one", "webhook"], default=os.getenv("DISCORD_TRANSPORT", "auto"))
+    notifications.set_defaults(discord=True)
     commands.add_parser("scoreboard", help="Read-only live scoreboard")
     resolve = commands.add_parser("resolve", help="Resolve a terminal incident or ambiguous Discord delivery")
     resolve.add_argument("--tick-id", type=int, required=True)
@@ -188,6 +199,28 @@ def main():
                 emit("scoreboard", data=c.call("hack26-get-scoreboard"))
             finally:
                 c.close()
+        elif args.command == "notify":
+            from .notifier import notify
+            team = team_handle(args.team)
+            Path(args.db).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.db + ".lock", "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                store = Store(args.db)
+                rows = [store.get(team, args.tick_id)] if args.tick_id is not None else store.pending(team)
+                if args.tick_id is not None and rows == [None]:
+                    raise ValueError("Unknown tick")
+                unsent = False
+                for row in rows:
+                    if not row["judgment"] or not row["decision"] or row["status"] != "active":
+                        emit("escalation_skipped", tick_id=row["tick_id"], reason="No active accepted decision")
+                        continue
+                    escalate(Tick.model_validate_json(row["tick"]), json.loads(row["decision"]),
+                             json.loads(row["judgment"]), args, team, store, notify)
+                    state = store.get(team, row["tick_id"])
+                    delivery = json.loads(state["escalation"]) if state["escalation"] else {}
+                    unsent |= delivery.get("status") in ("pending", "unknown")
+                if unsent:
+                    raise RuntimeError("Some notifications remain pending or unverified")
         elif args.command == "resolve":
             team = team_handle(args.team)
             Path(args.db).parent.mkdir(parents=True, exist_ok=True)
