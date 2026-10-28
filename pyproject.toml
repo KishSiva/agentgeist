@@ -14,9 +14,19 @@ test = ["pytest>=8,<10"]
 
 [project.scripts]
 agentgeist = "agentgeist.cli:main"
+kickoff = "agentgeist.main:kickoff"
+run_with_trigger = "agentgeist.main:run_with_trigger"
+
+[tool.crewai]
+type = "flow"
+project_id = "c6adbc52-17c0-492c-a715-936ebf453960"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["agentgeist*"]
+
+[tool.setuptools.package-data]
+agentgeist = ["fixtures/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

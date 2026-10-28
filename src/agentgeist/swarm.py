@@ -14,8 +14,8 @@ from .contracts import Decision, Tick, safety_floor
 
 
 class BudgetLLM(BaseLLM):
-    inner: Any
-    ledger: Any
+    inner: Any = Field(exclude=True, repr=False)
+    ledger: Any = Field(exclude=True, repr=False)
 
     def call(self, messages, **kwargs):
         # Reserve conservative local token-equivalent units plus full output allowance.

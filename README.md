@@ -3,6 +3,9 @@
 A supervised CrewAI hierarchy for Track 1. The team display name is **Agentgeist**.
 The scenario API requires the lowercase handle `agentgeist`.
 
+For CrewAI website runs and tracing, see [CrewAI setup](docs/CREWAI.md).
+The standard `crewai run` command runs real agents on a fixture without venue submissions or Discord posts.
+
 ## Run
 
 Use Python 3.10–3.13 and Node.js with `npx`.
