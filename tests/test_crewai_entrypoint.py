@@ -164,3 +164,24 @@ def test_live_mode_sanitizes_failures(monkeypatch, tmp_path):
         main.execute(main.RunOptions(mode="live"))
     assert str(caught.value) == "Live execution failed: ValueError"
     assert caught.value.__suppress_context__ is True
+
+
+def test_live_mode_suppresses_credential_bearing_provider_output(monkeypatch, tmp_path, capsys):
+    from crewai.events import crewai_event_bus
+    flushed = []
+    def fake_flush():
+        print("private-venue-token")
+        flushed.append(True)
+        return True
+    monkeypatch.setattr(crewai_event_bus, "flush", fake_flush)
+    monkeypatch.setenv("AGENTGEIST_ENABLE_LIVE", "true")
+    monkeypatch.setenv("CREWAI_TRACING_ENABLED", "false")
+    monkeypatch.setenv("AGENTGEIST_STATE_DIR", str(tmp_path))
+    def fake_run(args):
+        print("private-venue-token")
+        print("private-venue-token", file=sys.stderr)
+    monkeypatch.setattr(cli, "run", fake_run)
+    assert main.execute(main.RunOptions(mode="live"))["mode"] == "live"
+    output = capsys.readouterr()
+    assert flushed == [True]
+    assert "private-venue-token" not in output.out + output.err

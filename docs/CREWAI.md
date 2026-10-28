@@ -80,6 +80,7 @@ Live mode rejects missing or relative state paths. The operator must verify stor
 Set `CREWAI_TRACING_ENABLED=false` for live runs. Live mode rejects active CrewAI trace sessions.
 Venue MCP calls contain credentials, so only fixture runs support tracing.
 Live failures report only the exception type, not credential-bearing error text.
+Live execution suppresses provider console output because MCP events can contain credentials.
 Keep the same state database between runs and redeployments.
 A local file lock does not coordinate separate replicas with separate disks.
 

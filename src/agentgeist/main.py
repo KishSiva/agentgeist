@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from argparse import Namespace
+from contextlib import redirect_stderr, redirect_stdout
 from importlib.resources import files
 from pathlib import Path
 from typing import Literal
@@ -49,6 +50,8 @@ def execute(options: RunOptions):
 
     if os.getenv("AGENTGEIST_ENABLE_LIVE", "false").lower() != "true":
         raise ValueError("Set AGENTGEIST_ENABLE_LIVE=true only after configuring durable, single-worker state")
+    from crewai.events import crewai_event_bus
+    from crewai.events.event_listener import event_listener
     from crewai.events.listeners.tracing.utils import is_tracing_enabled_in_context
     from crewai.telemetry.tracing.context import get_trace_session
 
@@ -71,7 +74,14 @@ def execute(options: RunOptions):
         directory.mkdir(parents=True, exist_ok=True)
         with open(db + ".lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            run(args)
+            # MCP console events include authenticated URLs and tool arguments.
+            with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
+                try:
+                    run(args)
+                finally:
+                    event_listener.formatter.verbose = False
+                    if not crewai_event_bus.flush():
+                        raise RuntimeError("Live console event shutdown timed out")
             store = Store(db)
             try:
                 rows = store.db.execute("SELECT tick_id,judgment,escalation,status FROM incidents WHERE team=? ORDER BY tick_id DESC LIMIT 20",
