@@ -67,6 +67,7 @@ It treats crowd motion and folklore alone as insufficient evidence. These transp
 - Submission replay uses the original tick and action. The feed documents one accepted answer per team per tick.
 - Every real app execution posts one neutral run-completion summary, including `observe` decisions. Discord delivery
   requires a returned message identifier. An ambiguous delivery reports `unknown` and never retries automatically.
+- Mandatory run summaries require `DISCORD_WEBHOOK_URL`. The webhook does not consume incident credits.
 - Pre-send Discord failures remain retryable. Only the actual send marks delivery as unknown. Neither state stops scored processing.
 - Model failures and rejected submissions enter terminal states. An operator can retry or abandon them with `resolve`.
 - An unrecognized submission receipt enters `receipt_unverified`. The raw receipt remains available for inspection.

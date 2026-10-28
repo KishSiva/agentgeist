@@ -124,6 +124,39 @@ def test_live_observe_run_posts_one_summary_without_judgment(monkeypatch, tmp_pa
     assert calls[0][4]["result"]["decision"]["action"] == "observe"
 
 
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_live_failure_posts_one_failed_summary(monkeypatch, tmp_path, cleanup_failure):
+    from agentgeist import connections
+
+    class Scenario:
+        def call(self, *args, **kwargs):
+            if cleanup_failure:
+                return {"exhausted": True}
+            raise RuntimeError("private venue error")
+
+        def close(self):
+            if cleanup_failure:
+                raise RuntimeError("private cleanup error")
+
+    monkeypatch.setenv("SCENARIO_MCP", "mock://scenario")
+    monkeypatch.setattr(connections, "MCPConnection", lambda *args: Scenario())
+    messages = []
+
+    def notify(team, run_id, mode, status, ledger, **kwargs):
+        messages.append(notifier.run_notification_body(team, run_id, mode, status))
+        return {"status": "sent", "message_id": "123"}
+
+    monkeypatch.setattr(notifier, "notify_run", notify)
+    with pytest.raises(RuntimeError) as caught:
+        cli.run(Namespace(team="agentgeist", db=str(tmp_path / "state.db"), ticks=1,
+                          scenario="outbreak-level-5", submit=True, discord=False, discord_transport="webhook"))
+    assert "private venue error" not in str(caught.value)
+    assert "private cleanup error" not in str(caught.value)
+    assert caught.value.run_notification["message_id"] == "123"
+    assert len(messages) == 1 and "RUN FAILED" in messages[0]["content"]
+    assert "private venue error" not in messages[0]["content"]
+
+
 def test_wrong_target_never_posts(webhook):
     calls = webhook(lambda request: httpx.Response(200, json={"channel_id": "wrong"}))
     before = []

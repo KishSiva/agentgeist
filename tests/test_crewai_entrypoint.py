@@ -59,17 +59,62 @@ def test_live_mode_requires_explicit_environment_permission(monkeypatch):
         main.execute(main.RunOptions(mode="live"))
 
 
-def test_live_mode_preserves_cli_flags_and_bounded_execution(monkeypatch, tmp_path):
+def test_fixture_failure_posts_one_failed_summary_even_when_discord_is_false(monkeypatch):
+    from agentgeist import notifier
+    calls = []
+
+    def fail(*args):
+        raise RuntimeError("private provider error")
+
+    def notify(team, run_id, mode, status, ledger, **kwargs):
+        calls.append(notifier.run_notification_body(team, run_id, mode, status, kwargs["tick"]))
+        return {"status": "sent", "message_id": "123"}
+
+    monkeypatch.setattr(swarm, "run_swarm", fail)
+    monkeypatch.setattr(notifier, "notify_run", notify)
+    with pytest.raises(RuntimeError) as caught:
+        main.execute(main.RunOptions(discord=False))
+    assert "private provider error" not in str(caught.value)
+    assert caught.value.run_notification["status"] == "sent"
+    assert caught.value.run_notification["message_id"] == "123"
+    assert len(calls) == 1 and "RUN FAILED" in calls[0]["content"]
+    assert "private provider error" not in calls[0]["content"]
+
+
+@pytest.mark.parametrize("mode", ["fixture", "live"])
+@pytest.mark.parametrize("attempted", [False, True])
+def test_run_summary_delivery_failures_are_explicit_and_never_retried(monkeypatch, mode, attempted):
+    from agentgeist import notifier
+    calls = []
+
+    def fail(*args, before_send, **kwargs):
+        calls.append(True)
+        if attempted:
+            before_send()
+        raise TimeoutError("private transport error")
+
+    monkeypatch.setattr(notifier, "notify_run", fail)
+    kwargs = dict(team="agentgeist", run_id="a" * 32, tick=None, result=None, transport="webhook")
+    if mode == "fixture":
+        receipt = main._fixture_notification(**kwargs, run_status="failed")
+    else:
+        receipt = cli.run_summary(**kwargs, completed=False, submission_requested=True)
+    assert receipt == {"status": "unknown" if attempted else "failed", "run_id": "a" * 32}
+    assert calls == [True]
+
+
+@pytest.mark.parametrize("discord", [False, True])
+def test_live_mode_preserves_cli_flags_and_bounded_execution(monkeypatch, tmp_path, discord):
     monkeypatch.setenv("AGENTGEIST_ENABLE_LIVE", "true")
     monkeypatch.setenv("AGENTGEIST_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("CREWAI_TRACING_ENABLED", "false")
     monkeypatch.setenv("DISCORD_TRANSPORT", "webhook")
     def fake_run(args):
-        assert args.ticks == 1 and args.submit is True and args.discord is True
+        assert args.ticks == 1 and args.submit is True and args.discord is discord
         assert args.discord_transport == "webhook" and args.team == "agentgeist"
         return {"run_id": args.run_id, "notification": {"status": "sent", "message_id": "123", "run_id": args.run_id}}
     monkeypatch.setattr(cli, "run", fake_run)
-    result = main.execute(main.RunOptions(mode="live", submit=True, discord=True))
+    result = main.execute(main.RunOptions(mode="live", submit=True, discord=discord))
     assert result["mode"] == "live" and result["team"] == "agentgeist" and result["saved_incidents"] == []
     assert result["run_notification"]["status"] == "sent"
 
@@ -167,15 +212,20 @@ def test_live_mode_requires_explicit_absolute_state_directory(monkeypatch, direc
 
 
 def test_live_mode_sanitizes_failures(monkeypatch, tmp_path):
+    from agentgeist import notifier
     monkeypatch.setenv("AGENTGEIST_ENABLE_LIVE", "true")
     monkeypatch.setenv("CREWAI_TRACING_ENABLED", "false")
     monkeypatch.setenv("AGENTGEIST_STATE_DIR", str(tmp_path))
     def fail(args):
         raise ValueError("private-authenticated-url")
     monkeypatch.setattr(cli, "run", fail)
+    monkeypatch.setattr(notifier, "notify_run", lambda *args, **kwargs: {"status": "sent", "message_id": "123"})
     with pytest.raises(RuntimeError) as caught:
         main.execute(main.RunOptions(mode="live"))
-    assert str(caught.value) == "Live execution failed: ValueError"
+    diagnostic = json.loads(str(caught.value).split(": ", 1)[1])
+    assert diagnostic["error_type"] == "ValueError"
+    assert caught.value.run_notification["message_id"] == "123"
+    assert "private-authenticated-url" not in str(caught.value)
     assert caught.value.__suppress_context__ is True
 
 

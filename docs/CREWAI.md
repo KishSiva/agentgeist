@@ -92,3 +92,5 @@ Then use an explicit trigger payload:
 
 Each kickoff processes at most one new tick after the saved inbox. It does not install a polling daemon.
 Do not enable live mode on ephemeral or multi-worker storage until shared state is configured.
+
+Mandatory run summaries require `DISCORD_WEBHOOK_URL`, even when incident escalation uses One.

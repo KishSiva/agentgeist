@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .budget import BudgetExceeded, Ledger
 from .contracts import Tick, safety_floor, team_handle
+from .errors import RunFailed
 from .store import Store
 
 
@@ -105,21 +106,19 @@ def run(args):
         completed = True
         return report
     finally:
+        failure = sys.exc_info()[1]
         if scenario is not None:
             try:
                 scenario.close()
-            except Exception:
+            except Exception as error:
                 completed = False
-                raise
-            finally:
-                report["notification"] = run_summary(team, run_id, current_tick, latest_result, completed,
-                                                       submission_requested=bool(args.submit),
-                                                       transport=getattr(args, "discord_transport", None))
-        else:
-            report["notification"] = run_summary(team, run_id, current_tick, latest_result, completed,
-                                                   submission_requested=bool(args.submit),
-                                                   transport=getattr(args, "discord_transport", None))
+                failure = error
+        report["notification"] = run_summary(team, run_id, current_tick, latest_result, completed,
+                                               submission_requested=bool(args.submit),
+                                               transport=getattr(args, "discord_transport", None))
         emit("run_notification", **report["notification"])
+        if not completed and isinstance(failure, Exception):
+            raise RunFailed(type(failure).__name__, run_id, report["notification"]) from None
 
 
 def process_tick(tick, args, team, store, scenario, run_swarm, notify):

@@ -52,10 +52,11 @@ def execute(options: RunOptions):
         result = None
         try:
             result = run_swarm(tick, Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining))
-        except Exception:
-            _fixture_notification(team=options.team, run_id=run_id, tick=tick, result=None,
-                                  run_status="failed", transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
-            raise
+        except Exception as error:
+            from agentgeist.errors import RunFailed
+            receipt = _fixture_notification(team=options.team, run_id=run_id, tick=tick, result=None,
+                                            run_status="failed", transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
+            raise RunFailed(type(error).__name__, run_id, receipt) from None
         notification = _fixture_notification(team=options.team, run_id=run_id, tick=tick, result=result,
                                              run_status="completed", transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
         return {"mode": "fixture", "run_id": run_id, "tick_id": tick.tick_id, "submitted": False,
@@ -76,13 +77,15 @@ def execute(options: RunOptions):
     if not state_directory or not Path(state_directory).is_absolute():
         raise ValueError("Set AGENTGEIST_STATE_DIR to an absolute durable directory before live mode")
 
-    from agentgeist.cli import run
+    from agentgeist.cli import run, run_summary
+    from agentgeist.errors import RunFailed
     from agentgeist.store import Store
     directory = Path(state_directory)
     db = str(directory / "agentgeist.sqlite3")
     args = Namespace(team=options.team, db=db, scenario=options.scenario, ticks=1,
-                     submit=options.submit, discord=True, run_id=run_id,
+                     submit=options.submit, discord=options.discord, run_id=run_id,
                      discord_transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
+    report = {}
     try:
         directory.mkdir(parents=True, exist_ok=True)
         with open(db + ".lock", "w") as lock:
@@ -92,8 +95,9 @@ def execute(options: RunOptions):
                 try:
                     report = run(args) or {}
                 finally:
+                    pending_error = sys.exc_info()[1]
                     event_listener.formatter.verbose = False
-                    if not crewai_event_bus.flush():
+                    if not crewai_event_bus.flush() and pending_error is None:
                         raise RuntimeError("Live console event shutdown timed out")
             store = Store(db)
             try:
@@ -103,9 +107,13 @@ def execute(options: RunOptions):
                           "escalation": json.loads(row[2]) if row[2] else None, "status": row[3]} for row in rows]
             finally:
                 store.db.close()
+    except RunFailed:
+        raise
     except Exception as error:
         # HTTP exceptions can contain authenticated URLs; do not expose their text.
-        raise RuntimeError(f"Live execution failed: {type(error).__name__}") from None
+        receipt = report.get("notification") or run_summary(options.team, run_id, None, None, False,
+                                                            bool(options.submit), args.discord_transport)
+        raise RunFailed(type(error).__name__, run_id, receipt) from None
     return {"mode": "live", "team": options.team, "run_id": run_id,
             "run_notification": report.get("notification", {"status": "failed", "run_id": run_id}),
             "saved_incidents": saved}
