@@ -39,7 +39,9 @@ def submit(scenario, store, team, tick, result):
     if isinstance(judgment, dict) and isinstance(judgment.get("judgment"), dict):
         judgment = judgment["judgment"]
     if (not isinstance(judgment, dict) or type(judgment.get("score")) not in (int, float)
-            or not 0 <= judgment["score"] <= 1 or not isinstance(judgment.get("false_alarm"), bool)):
+            or not 0 <= judgment["score"] <= 1):
+        store.status(team, tick.tick_id, "receipt_unverified")
+        emit("receipt_unverified", tick_id=tick.tick_id, resolution="Inspect the saved raw response before retrying")
         raise RuntimeError("Unexpected judgment format; retain outbox for inspection")
     store.update(team, tick.tick_id, "judgment", judgment)
     emit("judgment", tick_id=tick.tick_id, judgment=judgment)
@@ -112,7 +114,7 @@ def process_tick(tick, args, team, store, scenario, run_swarm, notify):
             emit("tick_failed", tick_id=tick.tick_id, error=type(exc).__name__, resolution="Use resolve to retry or abandon")
             raise
         result = {"decision": safety_floor(tick).model_dump(), "mode": "budget_fallback",
-                  "evidence": {}, "peak_active_agents": ledger.peak,
+                  "model_decision_valid": False, "evidence": {}, "peak_active_agents": ledger.peak,
                   "credits_reserved": ledger.spent, "credits_remaining": ledger.remaining}
     result["decision_seconds"] = round(time.monotonic() - start, 3)
     result["credits_reserved"] = store.spent(team, tick.tick_id)

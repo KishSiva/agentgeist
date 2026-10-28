@@ -128,7 +128,7 @@ def run_swarm(tick: Tick, ledger: Ledger):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             proposed = result.pydantic or Decision.model_validate_json(raw)
             model_decision_valid = True
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, IndexError):
             proposed = safety_floor(tick)
             model_decision_valid = False
         # The supervisor enforces the published physical-evidence policy, not a model's guess.

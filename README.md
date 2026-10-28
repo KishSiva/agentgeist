@@ -60,6 +60,7 @@ It treats crowd motion and folklore alone as insufficient evidence. These transp
 - Discord delivery requires a returned message identifier. An ambiguous delivery stays pending for manual inspection.
 - Pre-send Discord failures remain retryable. Only the actual send marks delivery as unknown. Neither state stops scored processing.
 - Model failures and rejected submissions enter terminal states. An operator can retry or abandon them with `resolve`.
+- An unrecognized submission receipt enters `receipt_unverified`. The raw receipt remains available for inspection.
 - A resource-limit failure uses a clearly labeled, zero-model `budget_fallback` safety decision. It never starts excess agents.
 - `observe` does not post an incident alert. This reduces venue noise and false alarms.
 
