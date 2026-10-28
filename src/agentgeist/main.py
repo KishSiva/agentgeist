@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import sys
+import uuid
 from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
 from importlib.resources import files
@@ -27,7 +28,9 @@ class RunOptions(BaseModel):
     team: str = "agentgeist"
     scenario: Literal["outbreak-level-5", "control-tick"] = "outbreak-level-5"
     submit: bool = False
-    discord: bool = False
+    # Every real app execution reports its outcome. This remains for input compatibility,
+    # but false no longer disables the mandatory run-level summary.
+    discord: bool = True
 
     @field_validator("team")
     @classmethod
@@ -40,13 +43,23 @@ class AgentgeistState(RunOptions):
 
 
 def execute(options: RunOptions):
+    run_id = uuid.uuid4().hex
     if options.mode == "fixture":
         from agentgeist.budget import Ledger
         from agentgeist.swarm import run_swarm
         data = json.loads(files("agentgeist").joinpath("fixtures", options.scenario + ".json").read_text())
         tick = Tick.model_validate(data["ticks"][0])
-        result = run_swarm(tick, Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining))
-        return {"mode": "fixture", "tick_id": tick.tick_id, "submitted": False, "discord_posted": False, **result}
+        result = None
+        try:
+            result = run_swarm(tick, Ledger(tick.swarm_budget.max_active_agents, tick.swarm_budget.api_credits_remaining))
+        except Exception:
+            _fixture_notification(team=options.team, run_id=run_id, tick=tick, result=None,
+                                  run_status="failed", transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
+            raise
+        notification = _fixture_notification(team=options.team, run_id=run_id, tick=tick, result=result,
+                                             run_status="completed", transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
+        return {"mode": "fixture", "run_id": run_id, "tick_id": tick.tick_id, "submitted": False,
+                "discord_posted": notification["status"] == "sent", "run_notification": notification, **result}
 
     if os.getenv("AGENTGEIST_ENABLE_LIVE", "false").lower() != "true":
         raise ValueError("Set AGENTGEIST_ENABLE_LIVE=true only after configuring durable, single-worker state")
@@ -68,7 +81,7 @@ def execute(options: RunOptions):
     directory = Path(state_directory)
     db = str(directory / "agentgeist.sqlite3")
     args = Namespace(team=options.team, db=db, scenario=options.scenario, ticks=1,
-                     submit=options.submit, discord=options.discord,
+                     submit=options.submit, discord=True, run_id=run_id,
                      discord_transport=os.getenv("DISCORD_TRANSPORT", "webhook"))
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -77,7 +90,7 @@ def execute(options: RunOptions):
             # MCP console events include authenticated URLs and tool arguments.
             with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
                 try:
-                    run(args)
+                    report = run(args) or {}
                 finally:
                     event_listener.formatter.verbose = False
                     if not crewai_event_bus.flush():
@@ -93,7 +106,26 @@ def execute(options: RunOptions):
     except Exception as error:
         # HTTP exceptions can contain authenticated URLs; do not expose their text.
         raise RuntimeError(f"Live execution failed: {type(error).__name__}") from None
-    return {"mode": "live", "team": options.team, "saved_incidents": saved}
+    return {"mode": "live", "team": options.team, "run_id": run_id,
+            "run_notification": report.get("notification", {"status": "failed", "run_id": run_id}),
+            "saved_incidents": saved}
+
+
+def _fixture_notification(team, run_id, tick, result, run_status, transport):
+    """Fixture receipts are returned with the Flow result, never written as venue records."""
+    from agentgeist.budget import Ledger
+    from agentgeist.notifier import notify_run
+    receipt = {"status": "failed", "run_id": run_id}
+
+    def before_send():
+        receipt.update(status="unknown")
+
+    try:
+        delivered = notify_run(team, run_id, "fixture", run_status, Ledger(1, 0), tick=tick, result=result,
+                               before_send=before_send, transport=transport)
+    except Exception:
+        return receipt
+    return {**delivered, "run_id": run_id}
 
 
 class AgentgeistFlow(Flow[AgentgeistState]):

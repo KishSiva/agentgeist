@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 import httpx
@@ -76,6 +77,51 @@ def test_webhook_delivery_verifies_channel_and_receipt(webhook, monkeypatch, cap
     assert receipt["message_url"] == f"https://discord.com/channels/1234/{CHANNEL}/5678"
     assert ledger.peak == 1 and ledger.spent == 0 and ledger.remaining == 45000
     assert "test-token" not in caplog.text
+
+
+def test_run_summary_uses_neutral_format_for_fixture_and_live():
+    tick, result, _ = incident()
+    run_id = "a" * 32
+    fixture = notifier.run_notification_body("agentgeist", run_id, "fixture", "completed", tick, result)
+    live = notifier.run_notification_body("agentgeist", run_id, "live", "completed", tick, result)
+    assert fixture == live
+    assert "RUN COMPLETE" in fixture["content"]
+    assert "TEST" not in fixture["content"] and "FIXTURE" not in fixture["content"]
+    assert "Score:" not in fixture["content"] and "judgment" in fixture["content"]
+    assert fixture["allowed_mentions"] == {"parse": []}
+
+
+def test_live_observe_run_posts_one_summary_without_judgment(monkeypatch, tmp_path):
+    tick_data = json.loads(Path("fixtures/control-tick.json").read_text())["ticks"][0]
+
+    class Scenario:
+        def call(self, tool, **kwargs):
+            if tool == "hack26-get-tick":
+                return {"tick": tick_data}
+            assert tool == "hack26-get-scoreboard"
+            return {}
+        def close(self):
+            pass
+
+    monkeypatch.setenv("SCENARIO_MCP", "mock://scenario")
+    from agentgeist import connections, swarm
+    monkeypatch.setattr(connections, "MCPConnection", lambda *args: Scenario())
+    monkeypatch.setattr(swarm, "run_swarm", lambda tick, ledger: {
+        "decision": safety_floor(tick).model_dump(), "peak_active_agents": 4,
+    })
+    calls = []
+    def fake_notify(team, run_id, mode, status, ledger, **kwargs):
+        calls.append((team, run_id, mode, status, kwargs))
+        return {"status": "sent", "message_id": "123"}
+    monkeypatch.setattr(notifier, "notify_run", fake_notify)
+
+    report = cli.run(Namespace(team="agentgeist", db=str(tmp_path / "state.db"), scenario="control-tick",
+                               ticks=1, submit=False, discord=False, discord_transport="webhook"))
+    assert report["notification"] == {"status": "sent", "message_id": "123", "run_id": report["run_id"]}
+    assert len(calls) == 1
+    assert calls[0][2:4] == ("live", "completed")
+    assert calls[0][4]["submission_requested"] is False
+    assert calls[0][4]["result"]["decision"]["action"] == "observe"
 
 
 def test_wrong_target_never_posts(webhook):

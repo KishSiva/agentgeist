@@ -18,10 +18,10 @@ def test_packaged_fixtures_are_available():
         assert Tick.model_validate(data["ticks"][0]).sector_reports
 
 
-def test_flow_defaults_do_not_submit_or_post():
+def test_flow_defaults_do_not_submit_and_require_run_summary():
     options = main.RunOptions()
     assert options.mode == "fixture"
-    assert options.submit is False and options.discord is False
+    assert options.submit is False and options.discord is True
     assert main.RunOptions(team="Agentgeist").team == "agentgeist"
 
 
@@ -37,8 +37,19 @@ def test_fixture_mode_uses_real_swarm_interface_without_venue_effects(monkeypatc
         return {"decision": {"action": "evacuate", "rationale": "fixture"}}
     monkeypatch.setattr(swarm, "run_swarm", fake_swarm)
     monkeypatch.setattr(cli, "run", lambda *a: pytest.fail("Fixture must not run live CLI"))
+    import agentgeist.notifier as notifier
+    messages = []
+    def fake_notify(team, run_id, mode, status, ledger, **kwargs):
+        messages.append((team, run_id, mode, status, kwargs))
+        return {"status": "sent", "message_url": "https://discord.com/channels/1/2/3"}
+    monkeypatch.setattr(notifier, "notify_run", fake_notify)
     result = main.execute(main.RunOptions(submit=True, discord=True))
-    assert result["submitted"] is False and result["discord_posted"] is False
+    assert result["submitted"] is False and result["discord_posted"] is True
+    assert result["run_notification"]["message_url"] == "https://discord.com/channels/1/2/3"
+    team, run_id, mode, status, details = messages[0]
+    assert team == "agentgeist" and run_id == result["run_id"]
+    assert mode == "fixture" and status == "completed"
+    assert details["tick"].tick_id == result["tick_id"] and details["result"]["decision"]["action"] == "evacuate"
 
 
 def test_live_mode_requires_explicit_environment_permission(monkeypatch):
@@ -56,9 +67,11 @@ def test_live_mode_preserves_cli_flags_and_bounded_execution(monkeypatch, tmp_pa
     def fake_run(args):
         assert args.ticks == 1 and args.submit is True and args.discord is True
         assert args.discord_transport == "webhook" and args.team == "agentgeist"
+        return {"run_id": args.run_id, "notification": {"status": "sent", "message_id": "123", "run_id": args.run_id}}
     monkeypatch.setattr(cli, "run", fake_run)
     result = main.execute(main.RunOptions(mode="live", submit=True, discord=True))
-    assert result == {"mode": "live", "team": "agentgeist", "saved_incidents": []}
+    assert result["mode"] == "live" and result["team"] == "agentgeist" and result["saved_incidents"] == []
+    assert result["run_notification"]["status"] == "sent"
 
 
 def test_flow_keeps_synchronous_mcp_work_outside_event_loop(monkeypatch):

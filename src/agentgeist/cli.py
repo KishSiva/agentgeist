@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -54,47 +55,71 @@ def run(args):
     from .notifier import notify
     team = team_handle(args.team)
     store = Store(args.db)
-    scenario = MCPConnection(os.environ["SCENARIO_MCP"])
+    run_id = getattr(args, "run_id", None) or uuid.uuid4().hex
+    args.run_id = run_id
+    report = {"run_id": run_id, "notification": {"status": "failed", "run_id": run_id}}
+    scenario = None
+    current_tick = None
+    latest_result = None
+    completed = False
     try:
+        scenario = MCPConnection(os.environ["SCENARIO_MCP"])
         # Resume durable inbox/outbox first; never pull over an unfinished tick.
         for row in store.pending(team):
             if row["escalation"] and json.loads(row["escalation"]).get("status") == "unknown":
                 emit("escalation_unknown", tick_id=row["tick_id"], resolution="Use resolve after checking Discord")
                 continue
             if not row["decision"]:
-                process_tick(Tick.model_validate_json(row["tick"]), args, team, store, scenario, run_swarm, notify)
+                current_tick = Tick.model_validate_json(row["tick"])
+                latest_result = process_tick(current_tick, args, team, store, scenario, run_swarm, notify)
             elif args.submit:
-                tick = Tick.model_validate_json(row["tick"])
-                result = json.loads(row["decision"])
-                judgment = json.loads(row["judgment"]) if row["judgment"] else submit(scenario, store, team, tick, result)
-                escalate(tick, result, judgment, args, team, store, notify)
+                current_tick = Tick.model_validate_json(row["tick"])
+                latest_result = json.loads(row["decision"])
+                judgment = json.loads(row["judgment"]) if row["judgment"] else submit(scenario, store, team, current_tick, latest_result)
+                escalate(current_tick, latest_result, judgment, args, team, store, notify)
         if not args.submit and any(not row["judgment"] for row in store.pending(team)):
             emit("submission_pending", resolution="Use run --submit to replay the saved decision")
-            return
-        for _ in range(args.ticks):
-            data = scenario.call("hack26-get-tick", **auth(team), scenario=args.scenario)
-            receipt_id = store.save_raw(team, data)
-            if not isinstance(data, dict):
-                raise ValueError("Invalid feed payload; raw ingress saved")
-            if data.get("exhausted"):
-                emit("feed_exhausted")
-                break
-            try:
-                tick = Tick.model_validate(data.get("tick", data))
-            except ValueError:
-                emit("invalid_tick_saved", receipt_id=receipt_id)
-                raise
-            existing = store.get(team, tick.tick_id)
-            if existing:
-                emit("tick_already_saved", tick_id=tick.tick_id, status=existing["status"])
-                continue
-            store.save_tick(team, tick)
-            process_tick(tick, args, team, store, scenario, run_swarm, notify)
-            if not args.submit:
-                break  # Leave one unsubmitted decision in the durable outbox.
-        emit("scoreboard", data=scenario.call("hack26-get-scoreboard"))
+        else:
+            for _ in range(args.ticks):
+                data = scenario.call("hack26-get-tick", **auth(team), scenario=args.scenario)
+                receipt_id = store.save_raw(team, data)
+                if not isinstance(data, dict):
+                    raise ValueError("Invalid feed payload; raw ingress saved")
+                if data.get("exhausted"):
+                    emit("feed_exhausted")
+                    break
+                try:
+                    current_tick = Tick.model_validate(data.get("tick", data))
+                except ValueError:
+                    emit("invalid_tick_saved", receipt_id=receipt_id)
+                    raise
+                existing = store.get(team, current_tick.tick_id)
+                if existing:
+                    emit("tick_already_saved", tick_id=current_tick.tick_id, status=existing["status"])
+                    continue
+                store.save_tick(team, current_tick)
+                latest_result = process_tick(current_tick, args, team, store, scenario, run_swarm, notify)
+                if not args.submit:
+                    break  # Leave one unsubmitted decision in the durable outbox.
+            emit("scoreboard", data=scenario.call("hack26-get-scoreboard"))
+        completed = True
+        return report
     finally:
-        scenario.close()
+        if scenario is not None:
+            try:
+                scenario.close()
+            except Exception:
+                completed = False
+                raise
+            finally:
+                report["notification"] = run_summary(team, run_id, current_tick, latest_result, completed,
+                                                       submission_requested=bool(args.submit),
+                                                       transport=getattr(args, "discord_transport", None))
+        else:
+            report["notification"] = run_summary(team, run_id, current_tick, latest_result, completed,
+                                                   submission_requested=bool(args.submit),
+                                                   transport=getattr(args, "discord_transport", None))
+        emit("run_notification", **report["notification"])
 
 
 def process_tick(tick, args, team, store, scenario, run_swarm, notify):
@@ -123,6 +148,24 @@ def process_tick(tick, args, team, store, scenario, run_swarm, notify):
     if args.submit:
         judgment = submit(scenario, store, team, tick, result)
         escalate(tick, result, judgment, args, team, store, notify, ledger)
+    return result
+
+
+def run_summary(team, run_id, tick, result, completed, submission_requested, transport):
+    """Post exactly one neutral completion receipt for this execution."""
+    from .notifier import notify_run
+    receipt = {"status": "failed", "run_id": run_id}
+
+    def before_send():
+        receipt.update(status="unknown")
+
+    try:
+        delivered = notify_run(team, run_id, "live", "completed" if completed else "failed", Ledger(1, 0),
+                               tick=tick, result=result, submission_requested=submission_requested,
+                               before_send=before_send, transport=transport)
+    except Exception:
+        return receipt
+    return {**delivered, "run_id": run_id}
 
 
 def escalate(tick, result, judgment, args, team, store, notify, ledger=None):

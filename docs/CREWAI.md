@@ -26,7 +26,7 @@ Run the standard Flow to trace the real specialists and commander without touchi
 ```
 
 The default Flow reads the packaged outbreak fixture, calls real Parasail and You.com services,
-and returns the decision. It does not submit a judgment or post to Discord.
+returns the decision, and posts a neutral run-completion receipt to Discord. It does not submit a judgment.
 Open the workspace tracing view in https://app.crewai.com/ after the run.
 The existing `agentgeist` CLI remains available.
 
@@ -57,7 +57,7 @@ Configure deployment secrets directly in CrewAI:
 | `PARASAIL_API_KEY` | Model calls and embeddings |
 | `YOU_API_KEY` | Search and Contents |
 | `SCENARIO_MCP` | Venue feed, only for live mode |
-| `DISCORD_WEBHOOK_URL` | Discord credential, only for live posting |
+| `DISCORD_WEBHOOK_URL` | Discord credential for mandatory run-completion receipts |
 | `DISCORD_TRANSPORT` | Set to `webhook` for direct posting |
 | `CREWAI_TRACING_ENABLED` | Set to `true` for fixture runs; `false` for live runs |
 | `OTEL_SDK_DISABLED` | Set to `false` |

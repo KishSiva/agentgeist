@@ -1,10 +1,11 @@
 # Agentgeist — The Exorcism Protocol
 
-A supervised CrewAI hierarchy for Track 1. The team display name is **Agentgeist**.
+A supervised CrewAI swarm for Track 1. The team display name is **Agentgeist**.
 The scenario API requires the lowercase handle `agentgeist`.
 
 For CrewAI website runs and tracing, see [CrewAI setup](docs/CREWAI.md).
-The standard `crewai run` command runs real agents on a fixture without venue submissions or Discord posts.
+The standard `crewai run` command runs real agents on a fixture without a venue submission and posts a neutral
+run-completion receipt to the approved Discord channel.
 
 ## Run
 
@@ -37,12 +38,13 @@ The fixtures come from the event's published fixture files. Demo mode never subm
 | Sensor analyst | Sensors from every sector | Parasail embeddings and signature comparison |
 | Sighting researcher | Sightings from every sector | You.com Search and Contents |
 | Civilian marshal | Civilian status and containment state | Local civilian triage |
-| Incident commander | Specialist reports | CrewAI hierarchical synthesis |
+| Incident commander | Specialist reports | CrewAI commander synthesis |
 | Escalation officer | Approved decision and judgment only | One MCP or an operator-configured Discord webhook |
 
 The three specialists do not receive the full tick. A mandatory sensing phase executes each specialist's tool before its model analysis.
-The commander then coordinates their reports through a CrewAI hierarchical crew.
-The manager has no delegation tools during synthesis. It cannot send another specialist's private data back to a worker.
+The three specialist pipelines run in parallel with separate LLM clients and a shared budget.
+A fourth CrewAI agent then synthesizes their reports without a second orchestration layer.
+The commander has no delegation tools during synthesis. It cannot send another specialist's private data back to a worker.
 The supervisor counts all four CrewAI agents before work starts. The escalation officer runs after the crew finishes.
 Each specialist must actually use its assigned tool. The final decision includes tool evidence and any supervisor override.
 
@@ -63,12 +65,13 @@ It treats crowd motion and folklore alone as insufficient evidence. These transp
 - SQLite saves each raw feed response before validation, each valid tick before inference, and each decision before submission.
 - A restart processes pending ticks before it advances the team cursor.
 - Submission replay uses the original tick and action. The feed documents one accepted answer per team per tick.
-- Discord delivery requires a returned message identifier. An ambiguous delivery stays pending for manual inspection.
+- Every real app execution posts one neutral run-completion summary, including `observe` decisions. Discord delivery
+  requires a returned message identifier. An ambiguous delivery reports `unknown` and never retries automatically.
 - Pre-send Discord failures remain retryable. Only the actual send marks delivery as unknown. Neither state stops scored processing.
 - Model failures and rejected submissions enter terminal states. An operator can retry or abandon them with `resolve`.
 - An unrecognized submission receipt enters `receipt_unverified`. The raw receipt remains available for inspection.
 - A resource-limit failure uses a clearly labeled, zero-model `budget_fallback` safety decision. It never starts excess agents.
-- `observe` does not post an incident alert. This reduces venue noise and false alarms.
+- `observe` does not post a judgment escalation alert, but its run-completion summary is still delivered.
 
 The default database is `state/agentgeist.sqlite3`. Keep this database between runs.
 Do not run multiple CLI processes for the same team at once.
@@ -90,13 +93,16 @@ Use the same database for the same team. A new database starts a new local estim
 
 Raw responses remain in the SQLite `ingress` table when validation fails. Inspect and repair contract drift before another pull.
 Plain `run` advances the live cursor even without `--submit`. Use `demo` for offline checks.
-Public messages use only the supervisor's trusted rationale. They include a simulation label and disable all mentions.
+Public messages use only the supervisor's trusted rationale and disable all mentions. Run summaries do not claim a
+venue score or judgment unless a separate, accepted submission receipt exists.
 
 ### Discord webhook delivery
 
 Set `DISCORD_WEBHOOK_URL` in the environment or the ignored `.env` file. Never commit the URL or pass it as a command argument.
 Set `DISCORD_TRANSPORT=webhook` to post directly when One is unavailable.
-The app sends the notification from its normal scored-tick flow; no separate posting script is needed.
+The app sends one neutral run summary from every real fixture or live execution. Fixture runs remain non-venue and
+do not claim a venue submission, score, or judgment. A separate judgment escalation can still be sent after an
+accepted live submission.
 
 ```bash
 # Uses the webhook for each containment or evacuation judgment:

@@ -66,6 +66,47 @@ def notification_body(team, tick, result, judgment):
     return {"content": message[:1900], "allowed_mentions": {"parse": []}, "nonce": nonce, "enforce_nonce": True}
 
 
+def _duration(value):
+    if type(value) not in (int, float) or not 0 <= value < 86400:
+        return None
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def run_notification_body(team, run_id, mode, run_status, tick=None, result=None, submission_requested=False):
+    """Build a trusted run-level message without publishing model or venue content."""
+    from .contracts import safety_floor
+    if mode not in ("fixture", "live") or run_status not in ("completed", "failed"):
+        raise ValueError("Invalid run notification state")
+    if not re.fullmatch(r"[a-f0-9-]{16,64}", run_id):
+        raise ValueError("Invalid run identifier")
+    state = "COMPLETE" if run_status == "completed" else "FAILED"
+    lines = [f"Agentgeist ({team}) | RUN {state}", f"Run ID: {run_id}"]
+    submission = "requested" if submission_requested else "not requested"
+    lines.append(f"Venue submission: {submission}. This is a run summary, not a judgment.")
+    if tick is not None:
+        decision = safety_floor(tick).model_dump()
+        lines.append(f"Safety decision: {decision['action']} — {decision['rationale']}")
+    if isinstance(result, dict):
+        metrics = []
+        peak = result.get("peak_active_agents")
+        if type(peak) is int and 0 <= peak <= 100:
+            metrics.append(f"peak agents: {peak}")
+        decision_seconds = _duration(result.get("decision_seconds"))
+        if decision_seconds is not None:
+            metrics.append(f"decision: {decision_seconds}s")
+        timings = result.get("timings")
+        if isinstance(timings, dict):
+            for name in ("specialists", "commander", "total"):
+                duration = _duration(timings.get(name + "_seconds"))
+                if duration is not None:
+                    metrics.append(f"{name}: {duration}s")
+        if metrics:
+            lines.append("Metrics: " + "; ".join(metrics))
+    message = "\n".join(lines)
+    nonce = str(int(hashlib.sha256(f"run:{team}:{run_id}".encode()).hexdigest()[:16], 16))
+    return {"content": message[:1900], "allowed_mentions": {"parse": []}, "nonce": nonce, "enforce_nonce": True}
+
+
 def notify_one(body, before_send):
     connection = MCPConnection(one=True)
     try:
@@ -119,13 +160,12 @@ def notify_webhook(body, before_send):
         logger.disabled = was_disabled
 
 
-def notify(team, tick, result, judgment, ledger, before_send=lambda: None, transport=None):
+def _deliver(body, ledger, before_send, transport):
     """One officer, with operator-approved webhook delivery and no ambiguous retry."""
     transport = transport or os.getenv("DISCORD_TRANSPORT", "auto")
     if transport not in ("auto", "one", "webhook"):
         raise ValueError("Discord transport must be auto, one, or webhook")
     with ledger.agents(1):
-        body = notification_body(team, tick, result, judgment)
         attempted = False
 
         def mark_attempted():
@@ -143,3 +183,13 @@ def notify(team, tick, result, judgment, ledger, before_send=lambda: None, trans
             if transport != "auto" or attempted or not os.getenv("DISCORD_WEBHOOK_URL"):
                 raise
             return notify_webhook(body, mark_attempted)
+
+
+def notify(team, tick, result, judgment, ledger, before_send=lambda: None, transport=None):
+    return _deliver(notification_body(team, tick, result, judgment), ledger, before_send, transport)
+
+
+def notify_run(team, run_id, mode, run_status, ledger, tick=None, result=None,
+               submission_requested=False, before_send=lambda: None, transport=None):
+    return _deliver(run_notification_body(team, run_id, mode, run_status, tick, result, submission_requested),
+                    ledger, before_send, transport)
