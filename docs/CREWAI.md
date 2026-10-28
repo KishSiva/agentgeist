@@ -2,9 +2,11 @@
 
 ## Connect local tracing
 
-Use the same Python environment as Agentgeist:
+Use the same Python environment as Agentgeist. Install `uv` before setup: https://docs.astral.sh/uv/getting-started/installation/
+Keep the environment on `PATH` so CrewAI can find `uv`:
 
 ```bash
+export PATH="$PWD/.venv/bin:$PATH"
 .venv/bin/crewai login
 .venv/bin/crewai org list
 ```
