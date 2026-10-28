@@ -6,6 +6,10 @@ import os
 import httpx
 
 
+class MCPToolError(RuntimeError):
+    pass
+
+
 def decode_tool(value):
     if hasattr(value, "model_dump"):
         value = value.model_dump(by_alias=True)
@@ -14,11 +18,11 @@ def decode_tool(value):
             value = json.loads(value)
         except json.JSONDecodeError:
             if value.lstrip().lower().startswith(("error", "failed")):
-                raise RuntimeError("MCP tool reported a text error")
+                raise MCPToolError("MCP tool reported a text error")
             return value  # One action discovery returns Markdown documentation.
     if isinstance(value, dict):
         if value.get("isError") or value.get("error"):
-            raise RuntimeError("MCP tool returned an error; response not accepted as success")
+            raise MCPToolError("MCP tool returned an error; response not accepted as success")
         if value.get("structuredContent") is not None:
             return decode_tool(value["structuredContent"])
         if "content" in value:
@@ -31,18 +35,17 @@ def decode_tool(value):
 class MCPConnection:
     def __init__(self, url=None, headers=None, *, one=False):
         # Do not replace this with CrewAI's URL shorthand. It resolves no tools in some loops.
-        from crewai import Agent, LLM
         from crewai.mcp import MCPServerHTTP, MCPServerStdio
-        llm = LLM(model="openai/" + os.getenv("PARASAIL_CHAT_MODEL", "meta-llama/Llama-3.3-70B-Instruct"),
-                  base_url="https://api.parasail.io/v1", api_key=os.environ["PARASAIL_API_KEY"])
-        self.owner = Agent(role="MCP transport", goal="Resolve tools only", backstory="No autonomous tasks", llm=llm)
+        from crewai.mcp.tool_resolver import MCPToolResolver
+        from crewai.utilities.logger import Logger
+        self.resolver = MCPToolResolver(agent=None, logger=Logger(verbose=False))
         config = (MCPServerStdio(command="npx", args=["--yes", "@withone/mcp@2.3.2"],
                     env={"ONE_SECRET": os.environ["ONE_API_KEY"], "ONE_PERMISSIONS": "write",
                          "PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "/tmp")})
                   if one else MCPServerHTTP(url=url, streamable=True, headers=headers or {}))
         # CrewAI prints connection URLs, which can contain credentials. Keep them out of logs.
         with contextlib.redirect_stdout(io.StringIO()):
-            self.tools = self.owner.get_mcp_tools([config])
+            self.tools = self.resolver.resolve([config])
         if not self.tools:
             raise RuntimeError("MCP discovery returned zero tools")
 
@@ -54,7 +57,7 @@ class MCPConnection:
         return decode_tool(tool.run(**kwargs))
 
     def close(self):
-        self.owner._cleanup_mcp_clients()
+        self.resolver.cleanup()
 
 
 class Partners:

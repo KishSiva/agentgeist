@@ -124,3 +124,33 @@ def test_credits_survive_restart(tmp_path):
     tick_ledger(tick, "agentgeist", store).reserve(500)
     restarted = tick_ledger(tick, "agentgeist", Store(path))
     assert restarted.remaining == 44500
+
+
+def test_team_credit_ceiling_across_ticks(tmp_path):
+    from agentgeist.cli import tick_ledger
+    store = Store(str(tmp_path / "state.db"))
+    first, second = [Tick.model_validate(t) for t in fixture()]
+    store.save_tick("agentgeist", first)
+    tick_ledger(first, "agentgeist", store).reserve(30000)
+    store.save_tick("agentgeist", second)
+    ledger = tick_ledger(second, "agentgeist", store)
+    assert ledger.remaining == 15000
+    with pytest.raises(BudgetExceeded): ledger.reserve(15001)
+
+
+def test_terminal_and_raw_storage(tmp_path):
+    store = Store(str(tmp_path / "state.db"))
+    assert store.save_raw("agentgeist", {"unexpected": True}) == 1
+    tick = Tick.model_validate(fixture()[0])
+    store.save_tick("agentgeist", tick)
+    store.status("agentgeist", tick.tick_id, "failed")
+    assert not store.pending("agentgeist")
+    assert store.get("agentgeist", tick.tick_id)["status"] == "failed"
+
+
+def test_manager_cannot_redelegate_private_context():
+    from agentgeist.swarm import ScopedCrew
+    sentinel = object()
+    class Fake:
+        manager_agent = sentinel
+    assert ScopedCrew._prepare_tools(Fake(), sentinel, None, ["secret-context-tool"]) == []

@@ -32,11 +32,12 @@ The fixtures come from the event's published fixture files. Demo mode never subm
 | Sensor analyst | Sensors from every sector | Parasail embeddings and signature comparison |
 | Sighting researcher | Sightings from every sector | You.com Search and Contents |
 | Civilian marshal | Civilian status and containment state | Local civilian triage |
-| Incident commander | Specialist reports | CrewAI hierarchical delegation |
+| Incident commander | Specialist reports | CrewAI hierarchical synthesis |
 | Escalation officer | Approved decision and judgment only | One MCP Discord action |
 
 The three specialists do not receive the full tick. A mandatory sensing phase executes each specialist's tool before its model analysis.
 The commander then coordinates their reports through a CrewAI hierarchical crew.
+The manager has no delegation tools during synthesis. It cannot send another specialist's private data back to a worker.
 The supervisor counts all four CrewAI agents before work starts. The escalation officer runs after the crew finishes.
 Each specialist must actually use its assigned tool. The final decision includes tool evidence and any supervisor override.
 
@@ -48,18 +49,41 @@ It treats crowd motion and folklore alone as insufficient evidence. These transp
 
 - The active-agent gate rejects a tick with fewer than four available slots before model or partner calls.
 - The shared ledger reserves credits before each model, embedding, research, and escalation call.
+- A durable team-wide ceiling also limits total reservations across ticks. New ticks cannot reset spent credits.
 - The credit unit is a conservative local token-equivalent estimate, **not verified venue billing**. The feed does not document a monetary conversion.
 - Model reservations use twice the cl100k input token count plus an output allowance. Automatic model retries are disabled.
 - Each specialist and the commander gets one model iteration. Invalid commander JSON triggers an explicit, recorded safety-policy fallback.
 - HTTP requests have bounded timeouts. A failed tick remains in the durable inbox.
-- SQLite saves each tick before inference and each decision before submission.
+- SQLite saves each raw feed response before validation, each valid tick before inference, and each decision before submission.
 - A restart processes pending ticks before it advances the team cursor.
 - Submission replay uses the original tick and action. The feed documents one accepted answer per team per tick.
 - Discord delivery requires a returned message identifier. An ambiguous delivery stays pending for manual inspection.
+- Pre-send Discord failures remain retryable. Only the actual send marks delivery as unknown. Neither state stops scored processing.
+- Model failures and rejected submissions enter terminal states. An operator can retry or abandon them with `resolve`.
+- A resource-limit failure uses a clearly labeled, zero-model `budget_fallback` safety decision. It never starts excess agents.
 - `observe` does not post an incident alert. This reduces venue noise and false alarms.
 
 The default database is `state/agentgeist.sqlite3`. Keep this database between runs.
 Do not run multiple CLI processes for the same team at once.
+The CLI enforces one local process per database with a file lock.
+Use the same database for the same team. A new database starts a new local estimate and does not preserve prior spend.
+
+### Resolve a saved incident
+
+```bash
+# Retry a terminal model failure without resetting its spent credits:
+.venv/bin/agentgeist resolve --tick-id 142 --resolution retry
+# After checking Discord and confirming that the attempted message does not exist:
+.venv/bin/agentgeist resolve --tick-id 142 --resolution retry --confirm-no-discord-message
+# Record a message identifier you verified manually. This is user-confirmed, not tool-verified:
+.venv/bin/agentgeist resolve --tick-id 142 --resolution delivered --message-id 123456789012345678
+# Stop retrying a rejected or otherwise unusable tick:
+.venv/bin/agentgeist resolve --tick-id 142 --resolution abandon
+```
+
+Raw responses remain in the SQLite `ingress` table when validation fails. Inspect and repair contract drift before another pull.
+Plain `run` advances the live cursor even without `--submit`. Use `demo` for offline checks.
+Missing Discord access never triggers a direct-webhook bypass. Public messages use only the supervisor's trusted rationale.
 
 ## Connections
 

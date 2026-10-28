@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .budget import Ledger
+from .budget import BudgetExceeded, Ledger
 from .contracts import Tick, safety_floor, team_handle
 from .store import Store
 
@@ -27,9 +27,19 @@ def auth(team):
 def submit(scenario, store, team, tick, result):
     # Persist the exact action before the network call. Retries are server-idempotent per tick.
     store.update(team, tick.tick_id, "decision", result)
-    judgment = scenario.call("hack26-submit-containment", **auth(team),
-                             tick_id=tick.tick_id, action=result["decision"]["action"])
-    if not isinstance(judgment, dict):
+    from .connections import MCPToolError
+    try:
+        judgment = scenario.call("hack26-submit-containment", **auth(team),
+                                 tick_id=tick.tick_id, action=result["decision"]["action"])
+    except MCPToolError:
+        store.status(team, tick.tick_id, "rejected")
+        emit("submission_rejected", tick_id=tick.tick_id, resolution="Use resolve after inspecting the venue response")
+        raise
+    store.save_raw(team, {"tool": "hack26-submit-containment", "tick_id": tick.tick_id, "response": judgment})
+    if isinstance(judgment, dict) and isinstance(judgment.get("judgment"), dict):
+        judgment = judgment["judgment"]
+    if (not isinstance(judgment, dict) or type(judgment.get("score")) not in (int, float)
+            or not 0 <= judgment["score"] <= 1 or not isinstance(judgment.get("false_alarm"), bool)):
         raise RuntimeError("Unexpected judgment format; retain outbox for inspection")
     store.update(team, tick.tick_id, "judgment", judgment)
     emit("judgment", tick_id=tick.tick_id, judgment=judgment)
@@ -47,7 +57,8 @@ def run(args):
         # Resume durable inbox/outbox first; never pull over an unfinished tick.
         for row in store.pending(team):
             if row["escalation"] and json.loads(row["escalation"]).get("status") == "unknown":
-                raise RuntimeError("Prior Discord send is ambiguous. Inspect the channel and local outbox before retrying.")
+                emit("escalation_unknown", tick_id=row["tick_id"], resolution="Use resolve after checking Discord")
+                continue
             if not row["decision"]:
                 process_tick(Tick.model_validate_json(row["tick"]), args, team, store, scenario, run_swarm, notify)
             elif args.submit:
@@ -55,14 +66,26 @@ def run(args):
                 result = json.loads(row["decision"])
                 judgment = json.loads(row["judgment"]) if row["judgment"] else submit(scenario, store, team, tick, result)
                 escalate(tick, result, judgment, args, team, store, notify)
-            else:
-                raise RuntimeError("A decision awaits submission. Use run --submit to replay it before pulling another tick.")
+        if not args.submit and any(not row["judgment"] for row in store.pending(team)):
+            emit("submission_pending", resolution="Use run --submit to replay the saved decision")
+            return
         for _ in range(args.ticks):
             data = scenario.call("hack26-get-tick", **auth(team), scenario=args.scenario)
+            receipt_id = store.save_raw(team, data)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid feed payload; raw ingress saved")
             if data.get("exhausted"):
                 emit("feed_exhausted")
                 break
-            tick = Tick.model_validate(data.get("tick", data))
+            try:
+                tick = Tick.model_validate(data.get("tick", data))
+            except ValueError:
+                emit("invalid_tick_saved", receipt_id=receipt_id)
+                raise
+            existing = store.get(team, tick.tick_id)
+            if existing:
+                emit("tick_already_saved", tick_id=tick.tick_id, status=existing["status"])
+                continue
             store.save_tick(team, tick)
             process_tick(tick, args, team, store, scenario, run_swarm, notify)
             if not args.submit:
@@ -75,7 +98,22 @@ def run(args):
 def process_tick(tick, args, team, store, scenario, run_swarm, notify):
     start = time.monotonic()
     ledger = tick_ledger(tick, team, store)
-    result = run_swarm(tick, ledger)
+    try:
+        result = run_swarm(tick, ledger)
+    except Exception as exc:
+        cause, visited = exc, set()
+        budget_failure = False
+        while cause is not None and id(cause) not in visited:
+            visited.add(id(cause))
+            budget_failure |= isinstance(cause, BudgetExceeded)
+            cause = cause.__cause__ or cause.__context__
+        if not budget_failure:
+            store.status(team, tick.tick_id, "failed")
+            emit("tick_failed", tick_id=tick.tick_id, error=type(exc).__name__, resolution="Use resolve to retry or abandon")
+            raise
+        result = {"decision": safety_floor(tick).model_dump(), "mode": "budget_fallback",
+                  "evidence": {}, "peak_active_agents": ledger.peak,
+                  "credits_reserved": ledger.spent, "credits_remaining": ledger.remaining}
     result["decision_seconds"] = round(time.monotonic() - start, 3)
     result["credits_reserved"] = store.spent(team, tick.tick_id)
     store.update(team, tick.tick_id, "decision", result)
@@ -89,27 +127,27 @@ def escalate(tick, result, judgment, args, team, store, notify, ledger=None):
     if result["decision"]["action"] == "observe":
         store.update(team, tick.tick_id, "escalation", {"status": "not_required"})
         return
-    if not args.discord:
+    if not args.discord or getattr(args, "discord_blocked", False):
         emit("escalation_pending", tick_id=tick.tick_id, reason="Enable --discord to post through One MCP")
         return
     ledger = ledger or tick_ledger(tick, team, store)
-    store.update(team, tick.tick_id, "escalation", {"status": "unknown"})
+    store.update(team, tick.tick_id, "escalation", {"status": "pending"})
     try:
-        receipt = notify(team, tick, result, judgment, ledger)
+        receipt = notify(team, tick, result, judgment, ledger,
+                         before_send=lambda: store.update(team, tick.tick_id, "escalation", {"status": "unknown"}))
         store.update(team, tick.tick_id, "escalation", receipt)
         emit("discord_receipt", tick_id=tick.tick_id, receipt=receipt)
     except Exception as exc:
-        from .notifier import NoDiscordConnection
-        if isinstance(exc, NoDiscordConnection):
-            store.update(team, tick.tick_id, "escalation", {"status": "pending", "reason": "No selected writable Discord connection"})
+        args.discord_blocked = True
         # A Discord failure must not lose an accepted containment judgment.
         emit("escalation_pending", tick_id=tick.tick_id, error=type(exc).__name__)
-        raise RuntimeError("Discord delivery remains unverified; do not retry blindly after an ambiguous send") from None
+        # The outbox remains pending or unknown. Containment processing can continue.
 
 
 def tick_ledger(tick, team, store):
     return Ledger(tick.swarm_budget.max_active_agents,
-                  max(0, tick.swarm_budget.api_credits_remaining - store.spent(team, tick.tick_id)),
+                  max(0, min(tick.swarm_budget.api_credits_remaining - store.spent(team, tick.tick_id),
+                             store.remaining(team))),
                   on_reserve=lambda units: store.reserve(team, tick.tick_id, units))
 
 
@@ -129,6 +167,11 @@ def main():
     live.add_argument("--submit", action="store_true", help="Explicitly enable scored submissions")
     live.add_argument("--discord", action="store_true", help="Enable incident posting through One MCP")
     commands.add_parser("scoreboard", help="Read-only live scoreboard")
+    resolve = commands.add_parser("resolve", help="Resolve a terminal incident or ambiguous Discord delivery")
+    resolve.add_argument("--tick-id", type=int, required=True)
+    resolve.add_argument("--resolution", choices=["retry", "abandon", "delivered"], required=True)
+    resolve.add_argument("--message-id")
+    resolve.add_argument("--confirm-no-discord-message", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "demo":
@@ -143,6 +186,29 @@ def main():
                 emit("scoreboard", data=c.call("hack26-get-scoreboard"))
             finally:
                 c.close()
+        elif args.command == "resolve":
+            team = team_handle(args.team)
+            Path(args.db).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.db + ".lock", "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                store = Store(args.db)
+                row = store.get(team, args.tick_id)
+                if not row:
+                    raise ValueError("Unknown tick")
+                unknown = row["escalation"] and json.loads(row["escalation"]).get("status") == "unknown"
+                if args.resolution == "retry":
+                    if unknown and not args.confirm_no_discord_message:
+                        raise ValueError("Check Discord, then confirm no message before a retry")
+                    store.status(team, args.tick_id, "active")
+                    if row["escalation"]:
+                        store.update(team, args.tick_id, "escalation", {"status": "pending"})
+                elif args.resolution == "abandon":
+                    store.status(team, args.tick_id, "abandoned")
+                else:
+                    if not args.message_id or not args.message_id.isdigit() or not row["judgment"]:
+                        raise ValueError("Delivered resolution requires a message ID and accepted judgment")
+                    store.update(team, args.tick_id, "escalation", {"status": "user_confirmed", "message_id": args.message_id})
+                emit("resolved", tick_id=args.tick_id, resolution=args.resolution)
         else:
             Path(args.db).parent.mkdir(parents=True, exist_ok=True)
             with open(args.db + ".lock", "w") as lock:

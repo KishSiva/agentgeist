@@ -22,7 +22,8 @@ class BudgetLLM(BaseLLM):
         import tiktoken
         text = json.dumps(messages, default=str)
         self.ledger.reserve(2 * len(tiktoken.get_encoding("cl100k_base").encode(text)) + 1024)
-        return self.inner.call(messages, **kwargs)
+        value = self.inner.call(messages, **kwargs)
+        return self._apply_stop_words(value) if isinstance(value, str) else value
 
     def supports_function_calling(self):
         return False  # CrewAI's text tool protocol keeps reservations at the call boundary.
@@ -33,6 +34,14 @@ class BudgetLLM(BaseLLM):
 
 class NoArgs(BaseModel):
     pass
+
+
+class ScopedCrew(Crew):
+    def _prepare_tools(self, agent, task, tools):
+        # CrewAI turns manager delegation on internally. Never expose cross-role context tools.
+        if agent is self.manager_agent:
+            return []
+        return super()._prepare_tools(agent, task, tools)
 
 
 class ScopedTool(BaseTool):
@@ -59,6 +68,9 @@ def sensor_intel(sectors, partners):
     vectors = partners.embeddings(["High EMF, freezing temperature, repeated motion: anomalous signature",
                                    "Low EMF, room temperature, human crowd motion: normal signature"] + signatures)
     return [{"sector": s["sector"], "sensors": s["sensors"],
+             "physical_indicators": sum((s["sensors"]["emf_milligauss"] >= 60,
+                                          s["sensors"]["temp_c"] <= 5,
+                                          s["sensors"]["motion_events"] >= 10)),
              "anomaly_similarity": round(cosine(vectors[i+2], vectors[0]), 4),
              "normal_similarity": round(cosine(vectors[i+2], vectors[1]), 4)} for i, s in enumerate(sectors)]
 
@@ -93,7 +105,7 @@ def run_swarm(tick: Tick, ledger: Ledger):
                    ["Report physical anomalies", "Separate lore from corroborated sightings", "Prioritize civilian rescue"], tools)]
     commander = Agent(role="Incident commander", goal="Synthesize all three specialists and select one containment action",
                       backstory="Delegate each specialist task. Require tool evidence. Lore alone never proves danger.",
-                      allow_delegation=True, **common)
+                      allow_delegation=False, **common)
     try:
         with ledger.agents(4):
             # Enforce the sensing phase in code. A manager must not silently skip workers.
@@ -106,12 +118,15 @@ def run_swarm(tick: Tick, ledger: Ledger):
                                 "analysis": agent.execute_task(task)})
             task = Task(description="Combine the specialist reports below. Choose evacuate for civilians in corroborated danger, contain for a corroborated threat without civilians at risk, otherwise observe. Crowd motion or internet lore alone is not a threat. Return action and rationale. Reports: " + json.dumps(reports),
                         expected_output='Only valid JSON: {"action":"contain|evacuate|observe","rationale":"reason"}')
-            result = Crew(agents=workers, manager_agent=commander, process=Process.hierarchical,
+            result = ScopedCrew(agents=workers, manager_agent=commander, process=Process.hierarchical,
                           tasks=[task], verbose=False, memory=False, cache=True, share_crew=False).kickoff()
         if set(evidence) != {t.name for t in tools}:
             raise RuntimeError("Missing specialist tool evidence: " + ", ".join({t.name for t in tools} - set(evidence)))
         try:
-            proposed = result.pydantic or Decision.model_validate_json(result.raw)
+            raw = result.raw.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            proposed = result.pydantic or Decision.model_validate_json(raw)
             model_decision_valid = True
         except (ValueError, TypeError):
             proposed = safety_floor(tick)
@@ -120,7 +135,7 @@ def run_swarm(tick: Tick, ledger: Ledger):
         floor = safety_floor(tick)
         final = proposed if proposed.action == floor.action else floor
         priority = [s["sector"] for s in sorted(evidence["sensor_signatures"],
-                    key=lambda s: s["anomaly_similarity"] - s["normal_similarity"], reverse=True)]
+                    key=lambda s: (s["physical_indicators"], s["anomaly_similarity"] - s["normal_similarity"]), reverse=True)]
         return {"decision": final.model_dump(), "proposed": proposed.model_dump(),
                 "supervisor_override": not model_decision_valid or proposed.action != final.action, "evidence": evidence,
                 "model_decision_valid": model_decision_valid,

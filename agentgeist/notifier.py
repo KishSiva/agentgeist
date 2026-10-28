@@ -47,7 +47,7 @@ def message_receipt(response):
     raise RuntimeError("No message identifier for the approved Discord channel; delivery remains unverified")
 
 
-def notify(team, tick, result, judgment, ledger):
+def notify(team, tick, result, judgment, ledger, before_send=lambda: None):
     """A deterministic escalation officer. No access to raw sensor or research tools."""
     with ledger.agents(1):
         ledger.reserve(1500)
@@ -58,13 +58,15 @@ def notify(team, tick, result, judgment, ledger):
                                    task="Post an approved containment decision and its judgment to the incident channel",
                                    ai_model="agentgeist-deterministic-escalation-officer")
             action = action_contract(docs)
-            decision = result["decision"]
+            from .contracts import safety_floor
+            decision = safety_floor(tick).model_dump()  # Never publish untrusted model or web text.
             message = (f"Agentgeist ({team}) | tick {tick.tick_id} | {decision['action']}\n"
                        f"{decision['rationale']}\n"
                        f"Score: {judgment.get('score', 'not supplied')}; false alarm: {judgment.get('false_alarm', 'not supplied')}. "
                        f"Peak agents: {result['peak_active_agents']}; decision time: {result.get('decision_seconds', 'n/a')}s.\n"
                        f"Sensor inspection order: {', '.join(result.get('sensor_inspection_priority', []))}")
             nonce = str(int(hashlib.sha256(f"{team}:{tick.tick_id}".encode()).hexdigest()[:16], 16))
+            before_send()
             response = connection.call("execute_one_action", platform="discord", actionId=action, connectionKey=key,
                                        pathVariables={"channel_id": CHANNEL_ID, "channelId": CHANNEL_ID},
                                        data={"content": message[:1900], "allowed_mentions": {"parse": []},
