@@ -1,0 +1,126 @@
+import json
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from agentgeist.budget import BudgetExceeded, Ledger
+from agentgeist.connections import decode_tool
+from agentgeist.contracts import Decision, Tick, civilian_risk, safety_floor, team_handle
+from agentgeist.store import Store
+
+
+def fixture(name="outbreak-level-5"):
+    return json.loads(Path(f"fixtures/{name}.json").read_text())["ticks"]
+
+
+def test_team_normalization():
+    assert team_handle(" Agentgeist ") == "agentgeist"
+
+
+@pytest.mark.parametrize("team", ["x", "a_b", "bad/name", "a" * 33])
+def test_bad_team(team):
+    with pytest.raises(ValueError): team_handle(team)
+
+
+def test_every_sector_is_used():
+    d = fixture()[0]
+    d["sector_reports"].reverse()
+    assert safety_floor(Tick.model_validate(d)).action == "evacuate"
+
+
+@pytest.mark.parametrize("data", fixture())
+def test_outbreak(data):
+    assert safety_floor(Tick.model_validate(data)).action == "evacuate"
+
+
+def test_crowd_motion_is_not_a_threat():
+    assert safety_floor(Tick.model_validate(fixture("control-tick")[0])).action == "observe"
+
+
+def test_contain_without_civilians():
+    data = fixture()[0]
+    data["sector_reports"][0]["civilian_status"] = "clear"
+    assert safety_floor(Tick.model_validate(data)).action == "contain"
+
+
+def test_fixed_field_names():
+    data = fixture()[0]
+    data["sectors"] = data.pop("sector_reports")
+    with pytest.raises(ValidationError): Tick.model_validate(data)
+
+
+def test_duplicate_sectors_rejected():
+    data = fixture()[0]
+    data["sector_reports"] *= 2
+    with pytest.raises(ValidationError): Tick.model_validate(data)
+
+
+def test_agent_limit_and_release():
+    ledger = Ledger(3, 10)
+    with pytest.raises(BudgetExceeded):
+        with ledger.agents(4): pass
+    with pytest.raises(RuntimeError):
+        with ledger.agents(3): raise RuntimeError()
+    assert ledger.active == 0 and ledger.peak == 3
+
+
+def test_credit_reservation():
+    ledger = Ledger(4, 10)
+    ledger.reserve(10)
+    with pytest.raises(BudgetExceeded): ledger.reserve(1)
+    assert ledger.remaining == 0
+
+
+@pytest.mark.parametrize("status,expected", [("4 pinned", True), ("clear", False), ("0 pinned", False), ("no injured", False)])
+def test_civilian_status(status, expected):
+    assert civilian_risk(status) is expected
+
+
+def test_decision_enum():
+    with pytest.raises(ValidationError): Decision(action="attack", rationale="unsafe")
+
+
+def test_tool_error_is_not_success():
+    with pytest.raises(RuntimeError): decode_tool({"isError": True, "content": []})
+    assert decode_tool({"content": [{"type": "text", "text": '{"score":1}'}]}) == {"score": 1}
+
+
+def test_durable_outbox(tmp_path):
+    path = str(tmp_path / "state.db")
+    s = Store(path)
+    tick = Tick.model_validate(fixture()[0])
+    s.save_tick("agentgeist", tick)
+    s.save_tick("agentgeist", tick)
+    s.update("agentgeist", tick.tick_id, "decision", {"action": "evacuate"})
+    assert len(Store(path).pending("agentgeist")) == 1
+    assert not s.pending("other-team")
+    s.update("agentgeist", tick.tick_id, "judgment", {"score": 1})
+    s.update("agentgeist", tick.tick_id, "escalation", {"status": "sent"})
+    assert not s.pending("agentgeist")
+
+
+def test_specialists_share_evidence_reference():
+    from agentgeist.swarm import ScopedTool
+    evidence = {}
+    tool = ScopedTool(name="triage", description="test", callback=lambda: {"clear": True}, evidence=evidence)
+    tool._run()
+    assert evidence == {"triage": {"clear": True}}
+
+
+def test_discord_connection_and_receipt_guards():
+    from agentgeist.notifier import NoDiscordConnection, message_receipt, select_connection
+    with pytest.raises(NoDiscordConnection): select_connection({"connections": [{"platform": "github"}]})
+    with pytest.raises(RuntimeError): message_receipt({"id": "message", "channel_id": "wrong"})
+    assert message_receipt({"data": {"id": "123", "channel_id": "1564842098740695100"}})["status"] == "sent"
+
+
+def test_credits_survive_restart(tmp_path):
+    from agentgeist.cli import tick_ledger
+    path = str(tmp_path / "state.db")
+    store = Store(path)
+    tick = Tick.model_validate(fixture()[0])
+    store.save_tick("agentgeist", tick)
+    tick_ledger(tick, "agentgeist", store).reserve(500)
+    restarted = tick_ledger(tick, "agentgeist", Store(path))
+    assert restarted.remaining == 44500
